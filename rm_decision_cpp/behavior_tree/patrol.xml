@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <BehaviorTree ID="patrol">
+    <SequenceWithMemory>
+      <!-- 出生地测试点1 -->
+      <Timeout msec="120000">
+        <Nav2Pose goal="1.0,0.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <!-- 出生地测试点2 -->
+      <Timeout msec="15000">
+        <Nav2Pose goal="2.0,-0.5,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <!-- 高地 -->
+      <Timeout msec="60000">
+        <Nav2Pose goal="9.9,0.6,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <!-- 对面出生点 -->
+      <Timeout msec="60000">
+        <Nav2Pose goal="20.8,-2.6,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+    </SequenceWithMemory>
+  </BehaviorTree>
+  <!-- 注意：时间没有精细调整，只是大概值，除了保证让仿真中机器人走完，没有考虑其他任何因素！！！ -->
+
+  <!-- Description of Node Models (used by Groot) -->
+  <TreeNodesModel>
+    <Action ID="Nav2Pose">
+      <input_port name="goal"
+                  type="geometry_msgs::msg::PoseStamped_&lt;std::allocator&lt;void&gt; &gt;">goal send to navigator.</input_port>
+    </Action>
+  </TreeNodesModel>
+
+</root>
