@@ -17,6 +17,8 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>navigation2</exec_depend>
   <exec_depend>nav2_common</exec_depend>
+  <exec_depend>nav2_mppi_ego_controller</exec_depend>
+  <exec_depend>ego_planner</exec_depend>
   <exec_depend>pb_nav2_plugins</exec_depend>
   <exec_depend>nav2_plugins</exec_depend>
   <exec_depend>pb2025_sentry_nav</exec_depend>

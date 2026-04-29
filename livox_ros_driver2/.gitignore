@@ -1,4 +1,10 @@
-.vscode
-build
-package.xml
-__pycache__
+devel/
+build/
+install/
+log/
+
+.vscode/
+__pycache__/
+.catkin_workspace
+*.gv
+*.pdf

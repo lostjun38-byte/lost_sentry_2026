@@ -15,11 +15,11 @@
 #ifndef FAKE_VEL_TRANSFORM__FAKE_VEL_TRANSFORM_HPP_
 #define FAKE_VEL_TRANSFORM__FAKE_VEL_TRANSFORM_HPP_
 
+#include <example_interfaces/msg/float32.hpp>
 #include <memory>
 #include <mutex>
 #include <string>
 
-#include <example_interfaces/msg/float32.hpp>
 #include "geometry_msgs/msg/twist.hpp"
 #include "message_filters/subscriber.h"
 #include "message_filters/sync_policies/approximate_time.h"
@@ -70,12 +70,13 @@ private:
   std::string cmd_spin_topic_;
   std::string input_cmd_vel_topic_;
   std::string output_cmd_vel_topic_;
-  float spin_speed_;
+  float spin_speed_{0.0F};
 
   std::mutex cmd_vel_mutex_;
   geometry_msgs::msg::Twist::SharedPtr latest_cmd_vel_;
-  double current_robot_base_angle_;
+  double current_robot_base_angle_{0.0};
   rclcpp::Time last_controller_activate_time_;
+  bool controller_active_{false};
 };
 
 }  // namespace fake_vel_transform

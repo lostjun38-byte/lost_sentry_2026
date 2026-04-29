@@ -151,6 +151,21 @@ def generate_launch_description():
                 arguments=["--ros-args", "--log-level", log_level],
                 output="screen",
             ),
+            Node(
+                package='cpp_lidar_filter',
+                executable='lidar_filter_node',
+                name='my_lidar_filter',
+                output='screen',
+                parameters=[{
+                    'input_topic': '/gazebo/livox/custom_msg',
+                    'output_topic': '/gazebo/livox/custom_msg_filtered',
+                    'min_x': -0.5, 'max_x': 0.2,
+                    'min_y': -0.25, 'max_y': 0.25,
+                    'min_z': -0.2, 'max_z': 0.27,
+                    'negative': True,   # 挖掉车身
+                    'leaf_size': 0.05   # 降采样
+                }]
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(launch_dir, "slam_launch.py")

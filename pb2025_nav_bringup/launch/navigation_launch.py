@@ -133,7 +133,7 @@ def generate_launch_description():
     #     respawn_delay=2.0,
     #     arguments=["--ros-args", "--log-level", log_level],
     #     remappings=[('input_topic', 'terrain_map_ext_frist'),
-    #                     ('output_topic', 'terrain_map_ext')] 
+    #                     ('output_topic', 'terrain_map_ext')]
     # )
 
     start_terrain_analysis_ext_cmd = Node(
@@ -259,17 +259,17 @@ def generate_launch_description():
             #     ],
             # ),
             Node(
-                package='velocity_smoother_ext',          
-                executable='velocity_smoother_ext', 
-                name='velocity_smoother',
+                package="velocity_smoother_ext",
+                executable="velocity_smoother_ext",
+                name="velocity_smoother",
                 output="screen",
                 respawn=use_respawn,
-                respawn_delay=2.0,                 
+                respawn_delay=2.0,
                 parameters=[configured_params],
                 arguments=["--ros-args", "--log-level", log_level],
                 remappings=[
-                    ('cmd_vel', 'cmd_vel_controller'), 
-                    ('cmd_vel_smoothed', 'cmd_vel_nav2_result')
+                    ("cmd_vel", "cmd_vel_controller"),
+                    ("cmd_vel_smoothed", "cmd_vel_nav2_result"),
                 ],
             ),
             Node(
@@ -371,13 +371,13 @@ def generate_launch_description():
             #     ],
             # ),
             ComposableNode(
-                package='velocity_smoother_ext',          # 修改 1: 你的包名
-                plugin='velocity_smoother_ext::VelocitySmootherExt', # 修改 2: 你的插件类名
-                name='velocity_smoother',                 # 节点名可以保持不变，方便参数通过 yaml 载入
+                package="velocity_smoother_ext",  # 修改 1: 你的包名
+                plugin="velocity_smoother_ext::VelocitySmootherExt",  # 修改 2: 你的插件类名
+                name="velocity_smoother",  # 节点名可以保持不变，方便参数通过 yaml 载入
                 parameters=[configured_params],
                 remappings=[
-                    ('cmd_vel', 'cmd_vel_controller'), 
-                    ('cmd_vel_smoothed', 'cmd_vel_nav2_result')
+                    ("cmd_vel", "cmd_vel_controller"),
+                    ("cmd_vel_smoothed", "cmd_vel_nav2_result"),
                 ],
             ),
             ComposableNode(

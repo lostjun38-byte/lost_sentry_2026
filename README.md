@@ -8,7 +8,7 @@
 * autonomous_exploration_development_environment 地形分析
 * small_point_lio 对Odometry、雷达点云初步处理
 * loam_interface 对点云的坐标系从lidar_odom_到odom的转换,发布从odom到lidar的odometry：lidar_odometry
-* sensor_scan_generation 点云的坐标系从odom到lidar的转换，发布从odom到base_footprint的odometry:odometry
+* sensor_scan_generation 点云的坐标系从odom到lidar的转换，发布从odom到robot_base(gimbal)的odometry:odometry
 * rm_decision_cpp 决策模块
 * auto_aim_interfaces & rm_interfaces 消息定义
 * pd_omni_pid_pursuit_controller 控制器插件
