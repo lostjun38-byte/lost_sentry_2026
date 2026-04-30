@@ -166,6 +166,19 @@ def generate_launch_description():
                     'leaf_size': 0.05   # 降采样
                 }]
             ),
+
+            Node(
+                package='foxglove_bridge',       # 对应的 ROS 2 包名
+                executable='foxglove_bridge',    # 可执行文件名
+                name='foxglove_bridge',          # 运行时的节点名称
+                output='screen',                 # 将日志输出到终端屏幕
+                parameters=[{
+                    'port': 8765,                # WebSocket 监听端口 (默认 8765)
+                    'address': '0.0.0.0',        # 允许所有 IP 连接 (局域网内其他电脑可连)
+                    'tls': False,                # 局域网调试通常关闭 TLS 加密
+                }]
+            ),
+
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     os.path.join(launch_dir, "slam_launch.py")

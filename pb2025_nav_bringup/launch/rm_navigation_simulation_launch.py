@@ -48,6 +48,13 @@ def generate_launch_description():
     use_ego_planner = LaunchConfiguration("use_ego_planner")
     ego_frame_id = LaunchConfiguration("ego_frame_id")
     ego_map_topic = LaunchConfiguration("ego_map_topic")
+    ego_max_vel = LaunchConfiguration("ego_max_vel")
+    ego_max_acc = LaunchConfiguration("ego_max_acc")
+    ego_max_jerk = LaunchConfiguration("ego_max_jerk")
+    ego_path_sample_interval = LaunchConfiguration("ego_path_sample_interval")
+    ego_reference_speed = LaunchConfiguration("ego_reference_speed")
+    ego_reference_time_step = LaunchConfiguration("ego_reference_time_step")
+    ego_terminal_slowdown_distance = LaunchConfiguration("ego_terminal_slowdown_distance")
 
     configured_params = ParameterFile(
         RewrittenYaml(
@@ -158,6 +165,48 @@ def generate_launch_description():
         description="OccupancyGrid topic consumed by ego_planner",
     )
 
+    declare_ego_max_vel_cmd = DeclareLaunchArgument(
+        "ego_max_vel",
+        default_value="2.5",
+        description="Maximum reference speed used by ego_planner",
+    )
+
+    declare_ego_max_acc_cmd = DeclareLaunchArgument(
+        "ego_max_acc",
+        default_value="3.0",
+        description="Maximum reference acceleration used by ego_planner",
+    )
+
+    declare_ego_max_jerk_cmd = DeclareLaunchArgument(
+        "ego_max_jerk",
+        default_value="4.0",
+        description="Maximum reference jerk used by ego_planner",
+    )
+
+    declare_ego_path_sample_interval_cmd = DeclareLaunchArgument(
+        "ego_path_sample_interval",
+        default_value="0.4",
+        description="Path resampling interval used before ego_planner B-spline generation",
+    )
+
+    declare_ego_reference_speed_cmd = DeclareLaunchArgument(
+        "ego_reference_speed",
+        default_value="2.0",
+        description="Time-parameterized reference speed published for MPPI EgoTrajectoryCritic",
+    )
+
+    declare_ego_reference_time_step_cmd = DeclareLaunchArgument(
+        "ego_reference_time_step",
+        default_value="0.1",
+        description="Time step used by ego_planner reference trajectory message",
+    )
+
+    declare_ego_terminal_slowdown_distance_cmd = DeclareLaunchArgument(
+        "ego_terminal_slowdown_distance",
+        default_value="0.8",
+        description="Distance before local ego reference end where published reference speed tapers to zero",
+    )
+
     start_velodyne_convert_tool = Node(
         package="ign_sim_pointcloud_tool",
         executable="ign_sim_pointcloud_tool_node",
@@ -202,6 +251,13 @@ def generate_launch_description():
             "frame_id": ego_frame_id,
             "use_sim_time": use_sim_time,
             "map_topic": ego_map_topic,
+            "max_vel": ego_max_vel,
+            "max_acc": ego_max_acc,
+            "max_jerk": ego_max_jerk,
+            "path_sample_interval": ego_path_sample_interval,
+            "reference_speed": ego_reference_speed,
+            "reference_time_step": ego_reference_time_step,
+            "terminal_slowdown_distance": ego_terminal_slowdown_distance,
         }.items(),
     )
 
@@ -231,6 +287,13 @@ def generate_launch_description():
     ld.add_action(declare_use_ego_planner_cmd)
     ld.add_action(declare_ego_frame_id_cmd)
     ld.add_action(declare_ego_map_topic_cmd)
+    ld.add_action(declare_ego_max_vel_cmd)
+    ld.add_action(declare_ego_max_acc_cmd)
+    ld.add_action(declare_ego_max_jerk_cmd)
+    ld.add_action(declare_ego_path_sample_interval_cmd)
+    ld.add_action(declare_ego_reference_speed_cmd)
+    ld.add_action(declare_ego_reference_time_step_cmd)
+    ld.add_action(declare_ego_terminal_slowdown_distance_cmd)
     ld.add_action(declare_use_respawn_cmd)
 
     # Add the actions to launch all of the navigation nodes

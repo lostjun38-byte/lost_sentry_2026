@@ -450,7 +450,7 @@ controller_server:
         lookahead_time: 1.0
         max_match_distance: 1.0
         reference_dt: 0.1
-        max_reference_speed: 3.0
+        max_reference_speed: 2.5
         trajectory_point_step: 2
         cost_power: 1
         cost_weight: 8.0
@@ -499,8 +499,8 @@ controller_server:
       PathFollowCritic: #? incentivizes making progress along the path, what is the diff between this and PathAlignCritic?
         enabled: true
         cost_power: 1
-        cost_weight: 20.0
-        offset_from_furthest: 8 # Number of path points after furthest one any trajectory achieves to drive path tracking relative to.
+        cost_weight: 5.0
+        offset_from_furthest: 16 # Number of path points after furthest one any trajectory achieves to drive path tracking relative to.
         threshold_to_consider: 0.7 # That is to say, path following will be considered until the robot is within this distance of the goal, at which point the goal critic will take over.
       PathAngleCritic: # This critic penalizes trajectories at a high relative angle to the path. This helps the robot make sharp turns when necessary due to large accumulated angular errors.
         enabled: false
@@ -520,7 +520,7 @@ local_costmap:
   local_costmap:
     ros__parameters:
       use_sim_time: True
-      update_frequency: 10.0
+      update_frequency: 20.0
       publish_frequency: 5.0
       global_frame: odom
       robot_base_frame: gimbal_yaw_fake

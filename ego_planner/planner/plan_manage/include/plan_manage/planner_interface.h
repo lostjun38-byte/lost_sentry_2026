@@ -14,7 +14,6 @@
 #include <plan_env/grid_map.h>
 #include <plan_manage/plan_container.hpp>
 #include "nav_msgs/msg/occupancy_grid.hpp"
-#include "Bspline.h"
 #include <chrono>
 
 

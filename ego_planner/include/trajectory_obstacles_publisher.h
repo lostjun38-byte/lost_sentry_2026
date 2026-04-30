@@ -63,7 +63,6 @@ private:
     // 回调函数
     void rviz_global_path_callback(const nav_msgs::msg::Path::SharedPtr msg);
     void goal_pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-    void rviz_obstacles_callback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
     void rviz_point_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg);
     void pose_estimate_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg);
     void trigger_plan_callback(const std_msgs::msg::Bool::SharedPtr msg);
@@ -72,19 +71,17 @@ private:
     // 发布函数
     void publish_global_path();
     void publish_planned_trajectory();
-    void publish_obstacles();
     void publish_a_star_path();
     void publish_local_obstacles();
 
     // 辅助函数
     void generate_straight_path(const geometry_msgs::msg::PoseStamped& start, 
                                const geometry_msgs::msg::PoseStamped& goal);
-    void add_obstacle_at_position(double x, double y);
     std::string topic_or_default(const std::string& name, const std::string& default_value);
 
     void discretize_trajectory(const std::vector<PathPoint>& original_trajectory,
                            std::vector<PathPoint>& discrete_trajectory,
-                           double interval = 0.1);
+                           double interval = 0.4);
 
     double distance(const PathPoint& p1, const PathPoint& p2);
 
@@ -93,13 +90,11 @@ private:
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr a_star_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_traj_pub_;
     rclcpp::Publisher<ego_planner_msgs::msg::Trajectory>::SharedPtr ego_trajectory_pub_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr obs_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr obs_local_pub_;
 
     
     rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr rviz_global_path_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pose_sub_;
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr rviz_obstacles_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr rviz_point_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_estimate_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr trigger_plan_sub_;
@@ -112,10 +107,8 @@ private:
 
     // 数据存储
     std::vector<PathPoint> global_plan_traj_;
-    std::vector<ObstacleInfo> obstacles_;
     std::mutex data_mutex_;
     bool has_valid_global_path_;
-    bool has_obstacles_;
     bool should_plan_;
     bool needs_replan_;  // 新增：是否需要重新规划的标志
     bool map_from_costmap_ = false;
@@ -134,6 +127,10 @@ private:
     double max_vel_ = 2.0;
     double max_acc_ = 3.0;
     double max_jerk_ = 4.0;
+    double path_sample_interval_ = 0.4;
+    double reference_speed_ = 2.0;
+    double reference_time_step_ = 0.1;
+    double terminal_slowdown_distance_ = 0.8;
     double map_resolution_ = 0.1;
     double map_x_size_ = 50.0;
     double map_y_size_ = 50.0;
@@ -142,7 +139,6 @@ private:
     double map_inflate_value_ = 1.0;
     double local_planning_horizon_ = 5.0;
 
-    double theta_ = 0.0;
     bool auto_plan_ = true;
     std::string frame_id_ = "map";
     std::string map_topic_ = "global_costmap/costmap";

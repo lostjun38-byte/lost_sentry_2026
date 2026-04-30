@@ -18,6 +18,10 @@
 * velocity_smoother_ext 速度平滑器
 * pointcloud_to_laserscan 将terrain_map_ext转换为laserScan类型以表示障碍物（仅 SLAM 模式启动）
 * control_panel 控制面板
+* cpp_lidar_filter 去除车身点云
+* nav2_mppi_ego_controller MPPI控制器插件
+* ego_planner Ego B-spline 规划器插件
+* ego_planner_interface Ego B-spline 规划器接口插件
 
 > ## 待处理问题
 >

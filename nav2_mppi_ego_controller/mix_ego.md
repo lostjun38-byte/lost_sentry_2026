@@ -27,9 +27,9 @@ Ego-Planner 发布：
 - topic: `/ego_reference_trajectory`
 - type: `ego_planner_msgs/msg/Trajectory`
 - 来源：`PlannerInterface::getLocalPlanTrajResults(planned_traj)`
-- `velocity`：由 B-spline 一阶导速度范数填入 `PathPoint.v`
-- `yaw`：按相邻轨迹点方向计算
-- `time_step`：当前第一版为 `0.1`
+- `velocity`：按 `reference_speed` 对 Ego 几何轨迹做弧长重采样后写入，末端按 `terminal_slowdown_distance` 渐降到 0
+- `yaw`：按重采样段方向计算
+- `time_step`：由 `reference_time_step` 参数写入，默认 `0.1`
 
 原有 `visual_local_trajectory` 仍保留为 RViz 可视化 Path，但 MPPI critic 不再用它判定。
 
@@ -81,13 +81,12 @@ distance_penalty_weight * (position_error - max_match_distance)
 
 ```yaml
 critics:
-  - ConstraintCritic
   - ObstaclesCritic
-  - GoalCritic
-  - GoalAngleCritic
   - EgoTrajectoryCritic
+  - GoalCritic
+  - PathAlignCritic
   - PathFollowCritic
-  - PreferForwardCritic
+  - TwirlingCritic
 
 EgoTrajectoryCritic:
   enabled: true
@@ -96,16 +95,16 @@ EgoTrajectoryCritic:
   lookahead_time: 1.0
   max_match_distance: 1.0
   reference_dt: 0.1
-  max_reference_speed: 3.0
-  trajectory_point_step: 1
+  max_reference_speed: 2.5
+  trajectory_point_step: 2
   cost_power: 1
-  cost_weight: 5.0
+  cost_weight: 8.0
   position_weight: 1.0
-  yaw_weight: 0.3
-  velocity_weight: 0.2
+  yaw_weight: 0.0
+  velocity_weight: 0.5
   velocity_direction_weight: 0.3
   velocity_direction_min_speed: 0.05
-  distance_penalty_weight: 10.0
+  distance_penalty_weight: 15.0
 ```
 
 Ego-Planner 节点参数：
@@ -113,6 +112,13 @@ Ego-Planner 节点参数：
 ```yaml
 ego_trajectory_topic: "/ego_reference_trajectory"
 local_trajectory_topic: "visual_local_trajectory"
+max_vel: 2.5
+max_acc: 3.0
+max_jerk: 4.0
+path_sample_interval: 0.4
+reference_speed: 2.0
+reference_time_step: 0.1
+terminal_slowdown_distance: 0.8
 ```
 
 ## 地图输入与越界诊断
@@ -149,6 +155,230 @@ grid_y = floor((world_y - origin_y) / resolution)
 
 地图外查询仍然会被 Ego-Planner 视为占用，但底层日志已改为汇总式输出，避免正常边界膨胀过程刷屏。
 
+## 速度调参建议
+
+这套方案里，速度不是由单个参数决定的，而是由四层共同决定：
+
+1. Ego-Planner 发布的时间参考轨迹告诉 MPPI “希望多快、多远之后到哪里”。
+2. MPPI 在 `vx_max/vy_max/wz_max` 和采样噪声范围内生成候选控制序列。
+3. MPPI critics 根据 Ego 参考、路径进度、目标、障碍物、约束等代价选择低 cost 的控制序列。
+4. velocity smoother 和底盘速度变换在 MPPI 输出后再做加速度、死区、坐标变换和叠加自旋。
+
+因此，`vx_max` 只是可选速度上限，不是目标速度。小车实际慢时，要先判断慢发生在哪一层。
+
+### 推荐调参顺序
+
+第一步先看 `/ego_reference_trajectory`：
+
+```bash
+ros2 topic echo /ego_reference_trajectory --once
+```
+
+如果 `points[].velocity` 仍主要是 `0.3~0.5`，优先调 Ego 参考轨迹参数：
+
+```bash
+ego_reference_speed:=2.0
+ego_reference_time_step:=0.1
+ego_terminal_slowdown_distance:=0.8
+ego_max_vel:=2.5
+ego_path_sample_interval:=0.4
+```
+
+- `ego_reference_speed` 是当前最直接的期望巡航速度。
+- `ego_reference_time_step` 是 Ego 参考消息中相邻点的时间间隔，默认应和 MPPI `model_dt=0.05` 保持同一量级；`0.1` 表示 critic 每两个 MPPI 预测步推进一个 Ego 参考点。
+- `ego_reference_speed * ego_reference_time_step` 是发给 MPPI 的参考点弧长间距，默认 `2.0 * 0.1 = 0.2m`。
+- `ego_terminal_slowdown_distance` 只影响局部参考末端减速。它过大时，短局部轨迹大部分都会处于降速段，车会变慢；想让车更敢跑可降到 `0.4~0.6`。
+- `ego_max_vel` 是 Ego 发布参考速度的上限，必须大于等于 `ego_reference_speed`。
+- `ego_path_sample_interval` 影响送入 Ego B-spline 的几何路径点距。它不是最终速度，但过小会让内部 B-spline 时间分配偏慢，过大又会降低绕障轨迹细节。当前建议 `0.3~0.5`。
+
+第二步看 `cmd_vel_controller`：
+
+```bash
+ros2 topic echo /<namespace>/cmd_vel_controller
+```
+
+如果 Ego 参考已经是 `2.0` 左右，但 `cmd_vel_controller` 仍只有 `0.3~0.5`，说明 MPPI critics 或 costmap 在压速度。按下面顺序调：
+
+```yaml
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    FollowPath:
+      model_dt: 0.05
+      time_steps: 40
+      vx_max: 2.5
+      vx_min: -2.0
+      vy_max: 2.0
+      wz_max: 2.0
+      vx_std: 0.8
+      vy_std: 0.8
+      wz_std: 0.8
+      temperature: 0.3
+      gamma: 0.07
+```
+
+- `vx_max/vy_max/wz_max` 必须覆盖期望速度。若 `ego_reference_speed=2.0`，建议 `vx_max >= 2.3`。
+- `vx_std/vy_std/wz_std` 决定采样探索范围。上限调高但 std 很小，MPPI 可能很少采到高速候选。高速配置一般保持 `0.7~1.0`。
+- `temperature` 越低越偏向最低 cost 候选，越高越接近平均控制。太高会把快慢候选平均掉，输出变钝；太低可能抖。
+- `gamma` 是控制能量平滑项权重。过大时会偏向小控制量，速度上不去；过小会更激进。
+- `time_steps * model_dt` 是预测时域。当前 `40 * 0.05 = 2s`。速度越高，预测距离越长，local costmap 必须覆盖这段距离。
+
+第三步调 EgoTrajectoryCritic 与其他 critic 的相对权重：
+
+```yaml
+EgoTrajectoryCritic:
+  cost_weight: 8.0
+  position_weight: 1.0
+  velocity_weight: 0.5
+  velocity_direction_weight: 0.3
+  max_match_distance: 1.0
+  distance_penalty_weight: 15.0
+  lookahead_time: 1.0
+
+PathFollowCritic:
+  cost_weight: 5.0
+  offset_from_furthest: 16
+
+ObstaclesCritic:
+  repulsion_weight: 0.5
+  critical_weight: 20.0
+  collision_margin_distance: 0.08
+  inflation_radius: 0.7
+```
+
+- 如果 MPPI 不跟 Ego 速度，适当提高 `EgoTrajectoryCritic.velocity_weight`，例如 `0.5 -> 0.8`。
+- 如果 MPPI 为了贴 Ego 轨迹而绕障不自然，降低 `EgoTrajectoryCritic.cost_weight` 或 `position_weight`。
+- `max_match_distance` 太小会让参考轨迹稍有偏差就触发重罚，MPPI 可能宁愿低速保守；高速时可试 `1.0~1.5`。
+- `PathFollowCritic.offset_from_furthest` 越大，越鼓励预测末端往前追路径，通常会更敢往前走；但过大会在弯道和障碍附近变激进。
+- `ObstaclesCritic` 和 inflation 参数过保守时，高速候选更容易被障碍代价打掉，表现就是 Ego 参考很快但 MPPI 输出慢。
+
+第四步看 `cmd_vel`：
+
+```bash
+ros2 topic echo /<namespace>/cmd_vel
+```
+
+如果 `cmd_vel_controller` 已经快，但 `cmd_vel` 慢，问题在后处理：
+
+```yaml
+velocity_smoother:
+  smoothing_frequency: 20.0
+  feedback: "OPEN_LOOP"
+  max_velocity: [2.5, 2.5, 3.0]
+  min_velocity: [-2.5, -2.5, -3.0]
+  max_accel: [5.0, 5.0, 6.0]
+  max_decel: [-8.0, -8.0, -10.0]
+  deadband_velocity: [0.05, 0.05, 0.05]
+```
+
+- `max_velocity/min_velocity` 是后处理速度上限，要覆盖 MPPI 输出。
+- `max_accel` 太小会导致起速慢，看起来像 MPPI 不肯跑。
+- `max_decel` 绝对值太小会导致停车拖。
+- `deadband_velocity` 只应切掉极小速度，设太大会吞掉低速微调。
+
+`fake_vel_transform` 只做速度坐标变换，并把 `cmd_spin` 叠加到 `angular.z`。它不会降低线速度模长；如果 `cmd_vel_controller` 和 `cmd_vel` 线速度大小接近，慢不在这里。
+
+### costmap 对速度的影响
+
+MPPI 控制器打分使用 controller server 持有的局部 costmap。当前局部代价地图典型配置是 rolling window：
+
+```yaml
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 20.0
+      publish_frequency: 5.0
+      global_frame: odom
+      robot_base_frame: gimbal_yaw_fake
+      rolling_window: true
+      width: 10
+      height: 10
+      resolution: 0.05
+```
+
+高速时必须保证局部 costmap 覆盖 MPPI 预测距离。经验公式：
+
+```text
+local_costmap_half_width > ego_reference_speed * time_steps * model_dt + braking_margin
+```
+
+当前 `2.0m/s * 40 * 0.05 = 4.0m`，`width=10m` 的半宽是 `5m`，刚好够用。如果要跑 `2.5m/s`，预测距离是 `5m`，建议把局部地图加到 `12m` 或缩短预测时域，否则高速候选容易跑出有效地图或撞上未知区域，被 obstacle/cost critic 压掉。
+
+global costmap 主要影响全局路径和 Ego-Planner 的地图输入。当前 Ego-Planner 默认订阅：
+
+```yaml
+ego_map_topic: "global_costmap/costmap"
+```
+
+如果 global costmap 是 rolling window，长全局路径末端经常会超出 Ego 接收到的 OccupancyGrid 边界，Ego 规划会更保守或失败。高速调参时要关注这些日志：
+
+```text
+Ego 全局参考路径有 N/M 个点超出当前 OccupancyGrid 边界
+Ego 全局参考路径 frame 与 OccupancyGrid frame 不一致
+Ego-Planner 本次规划未生成 trajectory
+```
+
+若这些日志频繁出现，优先修 map topic、frame、costmap 尺寸，再调速度。否则速度参数调高也会被不可行轨迹和障碍代价压回低速。
+
+### 典型配置
+
+保守稳定：
+
+```bash
+ego_reference_speed:=1.2 ego_max_vel:=1.5 ego_path_sample_interval:=0.3
+```
+
+```yaml
+vx_max: 1.6
+vy_max: 1.2
+vx_std: 0.5
+vy_std: 0.5
+EgoTrajectoryCritic.velocity_weight: 0.4
+```
+
+常规快速：
+
+```bash
+ego_reference_speed:=2.0 ego_max_vel:=2.5 ego_path_sample_interval:=0.4
+```
+
+```yaml
+vx_max: 2.5
+vy_max: 2.0
+vx_std: 0.8
+vy_std: 0.8
+max_accel: [5.0, 5.0, 6.0]
+```
+
+激进高速：
+
+```bash
+ego_reference_speed:=2.4 ego_max_vel:=2.8 ego_terminal_slowdown_distance:=0.5
+```
+
+```yaml
+vx_max: 2.8
+vy_max: 2.3
+vx_std: 1.0
+vy_std: 1.0
+local_costmap.width: 12
+local_costmap.height: 12
+max_accel: [6.0, 6.0, 7.0]
+```
+
+激进配置必须同时检查障碍物膨胀、局部地图覆盖范围和实际底盘加速度能力。只提高参考速度和 `vx_max`，不扩大局部地图或加速度，通常只会让 MPPI 在 cost 上继续选择低速候选。
+
+### 快速定位表
+
+| 现象 | 优先检查 | 典型处理 |
+|---|---|---|
+| `/ego_reference_trajectory` 的 `velocity` 只有 `0.3~0.5` | `ego_reference_speed`、`ego_max_vel`、是否重启了新 launch | 提高 `ego_reference_speed`，确认 show-args 有新参数并完全重启 |
+| Ego 参考速度正常，但 `cmd_vel_controller` 慢 | MPPI critic、local costmap、障碍物代价 | 调 `velocity_weight`、`vx_std`、costmap 尺寸和 obstacle 权重 |
+| `cmd_vel_controller` 快，`cmd_vel` 慢 | velocity smoother | 调 `max_velocity/max_accel/max_decel/deadband` |
+| 直线快、弯道慢 | `velocity_direction_weight`、`PathAlignCritic`、`wz_max` | 适当降低方向约束或提高角速度能力 |
+| 靠近目标过早变慢 | `terminal_slowdown_distance`、GoalCritic 阈值 | 减小 `ego_terminal_slowdown_distance` 或调整 goal critic 触发距离 |
+| 有障碍物时明显慢 | `ObstaclesCritic`、inflation、local costmap | 降低过强 repulsion，确认地图没有虚假障碍 |
+
 ## 短路径保护
 
 Nav2 在接近目标或恢复后可能下发很短的局部全局路径，例如只有几个 pose，且相邻 pose 间距小于 `0.1m`。Ego-Planner 原离散化逻辑会丢弃所有短线段终点，导致整条路径被压成 1 个点；随后 B-spline 参数化会打印：
@@ -165,12 +395,22 @@ Nav2 在接近目标或恢复后可能下发很短的局部全局路径，例如
 - `PlannerInterface::makePlan()` 在参考路径少于 4 点时直接跳过 Ego B-spline 规划并清空旧结果，不再进入 Eigen 断言。
 - 如果短路径发生在接近目标阶段，Ego critic 会因为收到空参考轨迹而自动跳过，MPPI 仍由 Goal/Path/Obstacle critics 工作。
 
+## 对比原仓库删除项
+
+- 删除 planner/matplotlib-cpp
+- 删除旧 ROS1 生成头目录 planner/include
+- 移除旧 Bspline.h 依赖并简化 PlannerInterface::getTraj()
+- 删除未接线的 PointCloud2 手动障碍物入口
+- 删除 add_obstacle_at_position() 死代码
+- 删除未使用 include 和 theta_
+- 删除旧的空 /visual_obstacles 手动障碍物发布链路，保留 /visual_local_obstacles
+
 ## 第一版限制
 
-- 不使用 acceleration / jerk。
+- `Trajectory` 消息暂不发布 acceleration / jerk。
 - 参考点匹配按时间步比例推进，不做复杂最近点搜索。
-- `yaw` 由离散轨迹点方向估算，不是 Ego-Planner 优化变量。
-- `time_step` 当前固定为 `0.1`，后续可从 PlannerInterface 参数透出。
+- `yaw` 由重采样轨迹段方向估算，不是 Ego-Planner 优化变量。
+- `time_step` 已由 `reference_time_step` 参数透出。
 - `Trajectory` 当前只包含 MPPI critic 所需的 position、yaw、velocity。
 
 ## 后续升级

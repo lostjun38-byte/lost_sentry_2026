@@ -272,7 +272,7 @@ namespace ego_planner
         const double nominal_knot_interval =
             pp_.ctrl_pt_dist / std::max(pp_.max_vel_, 1e-3) * 1.2;
         double start_speed = first_segment_length / std::max(nominal_knot_interval, 1e-3);
-        start_speed = std::min(start_speed, std::min(0.6, pp_.max_vel_));
+        start_speed = std::min(start_speed, std::min(1.2, pp_.max_vel_));
         if (start_speed < 0.05 && (start_pt - local_target_pt).head<2>().norm() > 0.2) {
             start_speed = std::min(0.2, pp_.max_vel_);
         }
@@ -470,34 +470,13 @@ namespace ego_planner
     {
         auto info = &local_data_;
 
-        ego_planner::Bspline bspline;
-        bspline.order = 3;
-        bspline.traj_id = info->traj_id_;
-
         Eigen::MatrixXd pos_pts = info->position_traj_.getControlPoint();
-        bspline.pos_pts.reserve(pos_pts.cols());
-
-        for (int i = 0; i < pos_pts.cols(); ++i)
-        {
-            geometry_msgs::Point pt;
-            pt.x = pos_pts(0, i);
-            pt.y = pos_pts(1, i);
-            pt.z = pos_pts(2, i);
-            bspline.pos_pts.push_back(pt);
-        }
-
         Eigen::VectorXd knots = info->position_traj_.getKnot();
-        bspline.knots.reserve(knots.rows());
-
-        for (int i = 0; i < knots.rows(); ++i)
-        {
-            bspline.knots.push_back(knots(i));
-        }
 
         vector<ego_planner::UniformBspline> traj_;
         double traj_duration_;
 
-        ego_planner::UniformBspline pos_traj(pos_pts, bspline.order, 0.1);
+        ego_planner::UniformBspline pos_traj(pos_pts, 3, 0.1);
         pos_traj.setKnot(knots);
         traj_.clear();
         traj_.push_back(pos_traj);

@@ -6,8 +6,6 @@
 #include "trajectory_obstacles_publisher.h"
 #include <algorithm>
 #include <tf2/utils.h>
-#include <thread>
-#include "geometry_msgs/msg/quaternion.hpp"  // 确保包含四元数消息类型
 
 namespace
 {
@@ -30,7 +28,6 @@ double yawFromTrajectoryPoint(const std::vector<PathPoint> & trajectory, size_t 
 TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher() 
     : Node("ego_planner_interactive_node"),
       has_valid_global_path_(false),
-      has_obstacles_(false),
       should_plan_(true),
       needs_replan_(false)
 {
@@ -38,11 +35,32 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     this->declare_parameter("frame_id", frame_id_);
     this->declare_parameter("map_topic", map_topic_);
     this->declare_parameter("local_planning_horizon", local_planning_horizon_);
+    this->declare_parameter("max_vel", max_vel_);
+    this->declare_parameter("max_acc", max_acc_);
+    this->declare_parameter("max_jerk", max_jerk_);
+    this->declare_parameter("path_sample_interval", path_sample_interval_);
+    this->declare_parameter("reference_speed", reference_speed_);
+    this->declare_parameter("reference_time_step", reference_time_step_);
+    this->declare_parameter("terminal_slowdown_distance", terminal_slowdown_distance_);
     this->get_parameter("auto_plan", auto_plan_);
     this->get_parameter("frame_id", frame_id_);
     this->get_parameter("map_topic", map_topic_);
     this->get_parameter("local_planning_horizon", local_planning_horizon_);
+    this->get_parameter("max_vel", max_vel_);
+    this->get_parameter("max_acc", max_acc_);
+    this->get_parameter("max_jerk", max_jerk_);
+    this->get_parameter("path_sample_interval", path_sample_interval_);
+    this->get_parameter("reference_speed", reference_speed_);
+    this->get_parameter("reference_time_step", reference_time_step_);
+    this->get_parameter("terminal_slowdown_distance", terminal_slowdown_distance_);
     local_planning_horizon_ = std::max(local_planning_horizon_, 0.0);
+    max_vel_ = std::max(max_vel_, 1e-3);
+    max_acc_ = std::max(max_acc_, 1e-3);
+    max_jerk_ = std::max(max_jerk_, 1e-3);
+    path_sample_interval_ = std::max(path_sample_interval_, 1e-3);
+    reference_speed_ = std::clamp(reference_speed_, 1e-3, max_vel_);
+    reference_time_step_ = std::max(reference_time_step_, 1e-3);
+    terminal_slowdown_distance_ = std::max(terminal_slowdown_distance_, 0.0);
     should_plan_ = auto_plan_;
 
     const auto global_path_topic = topic_or_default("global_path_topic", "visual_global_path");
@@ -50,7 +68,6 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     local_trajectory_topic_ = topic_or_default("local_trajectory_topic", local_trajectory_topic_);
     ego_trajectory_topic_ = topic_or_default("ego_trajectory_topic", ego_trajectory_topic_);
     input_global_path_topic_ = topic_or_default("input_global_path_topic", input_global_path_topic_);
-    const auto obstacles_topic = topic_or_default("obstacles_topic", "visual_obstacles");
     const auto local_obstacles_topic = topic_or_default("local_obstacles_topic", "visual_local_obstacles");
     const auto goal_pose_topic = topic_or_default("goal_pose_topic", "goal_pose");
     const auto clicked_point_topic = topic_or_default("clicked_point_topic", "clicked_point");
@@ -64,7 +81,6 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     a_star_path_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(astar_topic, 10);
     local_traj_pub_ = this->create_publisher<nav_msgs::msg::Path>(local_trajectory_topic_, 10);
     ego_trajectory_pub_ = this->create_publisher<ego_planner_msgs::msg::Trajectory>(ego_trajectory_topic_, 10);
-    obs_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(obstacles_topic, 10);
     obs_local_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(local_obstacles_topic, 10);
 
     // 2. 创建订阅者（接收RViz下发的数据）
@@ -80,13 +96,6 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
         std::bind(&TrajectoryAndObstaclesPublisher::goal_pose_callback, this, std::placeholders::_1)
     );
 
-    // // 障碍物输入方式1：发布PointCloud2消息
-    // rviz_obstacles_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-    //     "/rviz_input_obstacles",
-    //     10,
-    //     std::bind(&TrajectoryAndObstaclesPublisher::rviz_obstacles_callback, this, std::placeholders::_1)
-    // );
-
     // 路径添加：使用Publish Point工具逐个添加
     rviz_point_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
         clicked_point_topic,
@@ -94,7 +103,7 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
         std::bind(&TrajectoryAndObstaclesPublisher::rviz_point_callback, this, std::placeholders::_1)
     );
 
-    // 障碍物输入方式3：使用2D Pose Estimate工具添加
+    // 使用 2D Pose Estimate 更新当前位姿
     pose_estimate_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         initial_pose_topic,
         10,
@@ -126,23 +135,24 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     RCLCPP_INFO(this->get_logger(), "Interactive Ego Planner Node Ready!");
     RCLCPP_INFO(this->get_logger(), "=== 使用方法 ===");
     RCLCPP_INFO(this->get_logger(), "1. 添加全局路径：使用2D Nav Goal工具设置终点");
-    RCLCPP_INFO(this->get_logger(), "2. 添加障碍物（三种方法任选）：");
-    RCLCPP_INFO(this->get_logger(), "   - 方法A：使用Publish Point工具点击地图");
-    RCLCPP_INFO(this->get_logger(), "   - 方法B：使用2D Pose Estimate工具点击Grid任意位置（推荐）");
-    RCLCPP_INFO(this->get_logger(), "   - 方法C：发布PointCloud2到 /rviz_input_obstacles");
-    RCLCPP_INFO(this->get_logger(), "3. 触发规划：ros2 topic pub /trigger_plan std_msgs/Bool \"{data: true}\"");
-    RCLCPP_INFO(this->get_logger(), "4. 停止规划：ros2 topic pub /trigger_plan std_msgs/Bool \"{data: false}\"");
-    RCLCPP_INFO(this->get_logger(), "5. 支持多次规划：可以反复发送true/false控制规划");
-    RCLCPP_INFO(this->get_logger(), "6. 地图输入话题：%s", map_topic.c_str());
-    RCLCPP_INFO(this->get_logger(), "7. Nav2全局路径输入话题：%s", input_global_path_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "2. 触发规划：ros2 topic pub /trigger_plan std_msgs/Bool \"{data: true}\"");
+    RCLCPP_INFO(this->get_logger(), "3. 停止规划：ros2 topic pub /trigger_plan std_msgs/Bool \"{data: false}\"");
+    RCLCPP_INFO(this->get_logger(), "4. 支持多次规划：可以反复发送true/false控制规划");
+    RCLCPP_INFO(this->get_logger(), "5. 地图输入话题：%s", map_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "6. Nav2全局路径输入话题：%s", input_global_path_topic_.c_str());
+    RCLCPP_INFO(
+        this->get_logger(),
+        "7. Ego速度参数: max_vel=%.3f, max_acc=%.3f, max_jerk=%.3f, "
+        "path_sample_interval=%.3f, reference_speed=%.3f, reference_time_step=%.3f",
+        max_vel_, max_acc_, max_jerk_, path_sample_interval_, reference_speed_, reference_time_step_);
     RCLCPP_INFO(this->get_logger(), "=== RViz2设置步骤 ===");
     RCLCPP_INFO(this->get_logger(), "1. 添加Grid显示");
     RCLCPP_INFO(this->get_logger(), "2. 添加2D Nav Goal工具（话题：/goal_pose）");
     RCLCPP_INFO(this->get_logger(), "3. 添加2D Pose Estimate工具（使用默认话题：/initialpose）");
     RCLCPP_INFO(this->get_logger(), "4. 添加Publish Point工具（使用默认话题：/clicked_point）");
-    RCLCPP_INFO(this->get_logger(), "5. 添加PointCloud2显示（话题：/visual_obstacles）");
+    RCLCPP_INFO(this->get_logger(), "5. 添加PointCloud2显示（话题：/visual_local_obstacles）");
     RCLCPP_INFO(this->get_logger(), "6. 添加Path显示（话题：/visual_global_path和/visual_local_trajectory）");
-    RCLCPP_INFO(this->get_logger(), "8. Ego参考轨迹输出话题：%s", ego_trajectory_topic_.c_str());
+    RCLCPP_INFO(this->get_logger(), "7. Ego参考轨迹输出话题：%s", ego_trajectory_topic_.c_str());
 }
 
 std::string TrajectoryAndObstaclesPublisher::topic_or_default(
@@ -163,29 +173,6 @@ void TrajectoryAndObstaclesPublisher::init_ego_planner_base()
         map_x_size_, map_y_size_, map_z_size_,
         map_resolution_, map_origin_, map_inflate_value_
     );
-}
-
-// 统一添加障碍物函数
-void TrajectoryAndObstaclesPublisher::add_obstacle_at_position(double x, double y)
-{
-    std::lock_guard<std::mutex> lock(data_mutex_);
-
-    ObstacleInfo obs;
-    obs.x = x;
-    obs.y = y;
-    obs.z = 0.0;
-    
-    obstacles_.push_back(obs);
-    has_obstacles_ = true;
-    
-    // 如果有障碍物更新且正在规划中，则标记需要重新规划
-    if (should_plan_) {
-        needs_replan_ = true;
-        RCLCPP_INFO(this->get_logger(), "障碍物更新，已标记需要重新规划");
-    }
-    
-    RCLCPP_INFO(this->get_logger(), "添加障碍物: (%.2f, %.2f), 总障碍物数量: %zu", 
-                x, y, obstacles_.size());
 }
 
 // 2D Pose Estimate回调函数
@@ -225,8 +212,8 @@ void TrajectoryAndObstaclesPublisher::trigger_plan_callback(const std_msgs::msg:
     if (should_plan_) {
         if (has_valid_global_path_) {
             needs_replan_ = true;
-            RCLCPP_INFO(this->get_logger(), "规划已触发! 路径点: %zu, 障碍物: %zu",
-                       global_plan_traj_.size(), obstacles_.size());
+            RCLCPP_INFO(this->get_logger(), "规划已触发! 路径点: %zu",
+                       global_plan_traj_.size());
         } else {
             RCLCPP_WARN(this->get_logger(), "无法触发规划: 没有有效的全局路径!");
         }
@@ -317,7 +304,7 @@ void TrajectoryAndObstaclesPublisher::generate_straight_path(const geometry_msgs
     }
 }
 
-// // 处理Publish Point点击 - 添加障碍物
+// 处理 Publish Point 点击 - 添加全局路径点
 void TrajectoryAndObstaclesPublisher::rviz_point_callback(const geometry_msgs::msg::PointStamped::SharedPtr msg)
 {
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -467,7 +454,7 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
             std::vector<PathPoint> global_plan_traj_temp;
 
 
-            discretize_trajectory(global_plan_traj_, global_plan_traj_temp, 0.1);
+            discretize_trajectory(global_plan_traj_, global_plan_traj_temp, path_sample_interval_);
              
             float mindist = 100000000;
             int minddex = 0;
@@ -529,7 +516,7 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
                 accumulated_distance += segment_length;
                 last_point = next_point;
             }
-            discretize_trajectory(global_plan_traj_after, global_plan_traj_temp, 0.1);
+            discretize_trajectory(global_plan_traj_after, global_plan_traj_temp, path_sample_interval_);
 
             ego_planner_->setPathPoint(global_plan_traj_temp);
         }
@@ -549,8 +536,6 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
                 map_topic_.c_str());
         }
         ego_planner_->setCurrentVehiclePos(cur_pose_);
-        // 设置障碍物
-        ego_planner_->setObstacles(obstacles_);
 
         // 触发Ego Planner规划
         ego_planner_->makePlan();
@@ -563,10 +548,9 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
             RCLCPP_WARN(
                 this->get_logger(),
                 "Ego-Planner 本次规划未生成 trajectory: trajectory_generated=false, "
-                "global_path=%zu, obstacles=%zu, "
+                "global_path=%zu, "
                 "a_star_paths=%zu, map_received=%s, cur=(%.3f, %.3f)",
                 global_plan_traj_.size(),
-                obstacles_.size(),
                 a_star_pathes_.size(),
                 map_from_costmap_ ? "true" : "false",
                 cur_pose_.x,
@@ -589,21 +573,12 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
                 a_star_pathes_.size());
         }
 
-        if (has_obstacles_) {
-            RCLCPP_INFO_THROTTLE(
-                       this->get_logger(),
-                       *this->get_clock(),
-                       2000,
-                       "规划完成! 包含障碍物避让. 路径点: %zu, 障碍物: %zu", 
-                       global_plan_traj_.size(), obstacles_.size());
-        } else {
-            RCLCPP_INFO_THROTTLE(
-                       this->get_logger(),
-                       *this->get_clock(),
-                       2000,
-                       "规划完成! 无障碍物. 路径点: %zu", 
-                       global_plan_traj_.size());
-        }
+        RCLCPP_INFO_THROTTLE(
+                   this->get_logger(),
+                   *this->get_clock(),
+                   2000,
+                   "规划完成! 路径点: %zu", 
+                   global_plan_traj_.size());
         
         // 规划完成后，重置重新规划标志，但保持 should_plan_ 为 true
         // 这样下次有数据更新时可以自动重新规划
@@ -615,7 +590,6 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
     // 发布所有可视化数据（无论是否更新，保持实时显示）
     publish_global_path();
     publish_planned_trajectory();
-    publish_obstacles();
     publish_a_star_path();
     publish_local_obstacles();
 }
@@ -724,7 +698,7 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
 
     ego_planner_msgs::msg::Trajectory ego_traj;
     ego_traj.header = visual_traj.header;
-    ego_traj.time_step = 0.1f;
+    ego_traj.time_step = static_cast<float>(reference_time_step_);
 
     for (size_t i = 0; i < planned_traj.size(); ++i)
     {
@@ -744,14 +718,67 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
         pose.pose.orientation.w = q.w();
 
         visual_traj.poses.push_back(pose);
+    }
 
+    if (planned_traj.size() == 1) {
         ego_planner_msgs::msg::TrajectoryPoint point;
-        point.x = planned_traj[i].x;
-        point.y = planned_traj[i].y;
-        point.z = planned_traj[i].z;
-        point.yaw = static_cast<float>(yaw);
-        point.velocity = std::max(planned_traj[i].v, 0.0f);
+        point.x = planned_traj.front().x;
+        point.y = planned_traj.front().y;
+        point.z = planned_traj.front().z;
+        point.yaw = 0.0f;
+        point.velocity = 0.0f;
         ego_traj.points.push_back(point);
+    } else if (planned_traj.size() > 1) {
+        std::vector<double> cumulative_distance(planned_traj.size(), 0.0);
+        for (size_t i = 1; i < planned_traj.size(); ++i) {
+            cumulative_distance[i] =
+                cumulative_distance[i - 1] + distance(planned_traj[i - 1], planned_traj[i]);
+        }
+
+        const double total_distance = cumulative_distance.back();
+        if (total_distance > 1e-6) {
+            size_t segment_idx = 1;
+            const double spatial_step = std::max(reference_speed_ * reference_time_step_, 1e-3);
+
+            auto append_reference_point = [&](double sample_distance, bool force_stop) {
+                sample_distance = std::clamp(sample_distance, 0.0, total_distance);
+                while (segment_idx + 1 < cumulative_distance.size() &&
+                    cumulative_distance[segment_idx] <= sample_distance)
+                {
+                    ++segment_idx;
+                }
+
+                const size_t prev_idx = segment_idx > 0 ? segment_idx - 1 : 0;
+                const auto & start = planned_traj[prev_idx];
+                const auto & end = planned_traj[segment_idx];
+                const double segment_length = cumulative_distance[segment_idx] -
+                    cumulative_distance[prev_idx];
+                const double ratio = segment_length > 1e-6 ?
+                    (sample_distance - cumulative_distance[prev_idx]) / segment_length : 0.0;
+
+                ego_planner_msgs::msg::TrajectoryPoint point;
+                point.x = start.x + ratio * (end.x - start.x);
+                point.y = start.y + ratio * (end.y - start.y);
+                point.z = start.z + ratio * (end.z - start.z);
+                const double dx = end.x - start.x;
+                const double dy = end.y - start.y;
+                point.yaw = static_cast<float>(
+                    std::hypot(dx, dy) > 1e-4 ? std::atan2(dy, dx) : yawFromTrajectoryPoint(planned_traj, prev_idx));
+
+                double point_speed = force_stop ? 0.0 : reference_speed_;
+                if (!force_stop && terminal_slowdown_distance_ > 1e-6) {
+                    const double remaining_distance = total_distance - sample_distance;
+                    point_speed *= std::clamp(remaining_distance / terminal_slowdown_distance_, 0.0, 1.0);
+                }
+                point.velocity = static_cast<float>(std::clamp(point_speed, 0.0, max_vel_));
+                ego_traj.points.push_back(point);
+            };
+
+            for (double sample_distance = 0.0; sample_distance < total_distance; sample_distance += spatial_step) {
+                append_reference_point(sample_distance, false);
+            }
+            append_reference_point(total_distance, true);
+        }
     }
 
     local_traj_pub_->publish(visual_traj);
@@ -769,56 +796,36 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
             should_plan_ ? "true" : "false",
             needs_replan_ ? "true" : "false",
             map_from_costmap_ ? "true" : "false");
+    } else if (ego_traj.points.empty()) {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            2000,
+            "发布空 Ego 时间参考轨迹: topic=%s, bspline_points=%zu",
+            ego_trajectory_topic_.c_str(),
+            planned_traj.size());
     } else {
-        const auto & first = planned_traj.front();
-        const auto & last = planned_traj.back();
+        const auto & first = ego_traj.points.front();
+        const auto & last = ego_traj.points.back();
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             2000,
-            "已发布 Ego 参考轨迹: topic=%s, points=%zu, first=(%.3f, %.3f, v=%.3f), "
-            "last=(%.3f, %.3f, v=%.3f)",
+            "已发布 Ego 参考轨迹: topic=%s, bspline_points=%zu, reference_points=%zu, "
+            "reference_speed=%.3f, reference_time_step=%.3f, "
+            "first=(%.3f, %.3f, v=%.3f), last=(%.3f, %.3f, v=%.3f)",
             ego_trajectory_topic_.c_str(),
             planned_traj.size(),
+            ego_traj.points.size(),
+            reference_speed_,
+            reference_time_step_,
             first.x,
             first.y,
-            first.v,
+            first.velocity,
             last.x,
             last.y,
-            last.v);
+            last.velocity);
     }
-}
-
-// 发布可视化障碍物
-void TrajectoryAndObstaclesPublisher::publish_obstacles()
-{
-    // if (obstacles_.empty()) return;
-
-    sensor_msgs::msg::PointCloud2 visual_obs;
-    visual_obs.header.stamp = this->now();
-    visual_obs.header.frame_id = frame_id_;
-    visual_obs.width = obstacles_.size();
-    visual_obs.height = 1;
-    visual_obs.is_dense = true;
-
-    sensor_msgs::PointCloud2Modifier modifier(visual_obs);
-    modifier.setPointCloud2FieldsByString(1, "xyz");
-
-    sensor_msgs::PointCloud2Iterator<float> iter_x(visual_obs, "x");
-    sensor_msgs::PointCloud2Iterator<float> iter_y(visual_obs, "y");
-    sensor_msgs::PointCloud2Iterator<float> iter_z(visual_obs, "z");
-
-    for (const auto& obs : obstacles_)
-    {
-        *iter_x = static_cast<float>(obs.x);
-        *iter_y = static_cast<float>(obs.y);
-        *iter_z = 0.0f;
-        ++iter_x;
-        ++iter_y;
-        ++iter_z;
-    }
-
-    obs_pub_->publish(visual_obs);
 }
 
 void TrajectoryAndObstaclesPublisher::publish_local_obstacles()
@@ -869,10 +876,10 @@ double TrajectoryAndObstaclesPublisher::distance(const PathPoint& p1, const Path
 }
 
 /**
- * 将轨迹离散为均匀间隔的点（间隔10cm）
+ * 将轨迹离散为均匀间隔的点
  * @param original_trajectory 原始轨迹（由多个顶点组成的折线）
  * @param discrete_trajectory 输出的离散轨迹
- * @param interval 间隔距离（单位：米，默认0.1米即10cm）
+ * @param interval 间隔距离（单位：米）
  */
 void TrajectoryAndObstaclesPublisher::discretize_trajectory(const std::vector<PathPoint>& original_trajectory,
                                                             std::vector<PathPoint>& discrete_trajectory,
