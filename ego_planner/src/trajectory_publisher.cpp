@@ -227,41 +227,51 @@ void TrajectoryAndObstaclesPublisher::trigger_plan_callback(const std_msgs::msg:
 
 void TrajectoryAndObstaclesPublisher::costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
 {
-    std::lock_guard<std::mutex> lock(data_mutex_);
-    ego_planner_->setNav2InflatedOccupancyGridMap(*msg);
-    map_from_costmap_ = true;
-    has_costmap_bounds_ = msg->info.width > 0 && msg->info.height > 0 && msg->info.resolution > 0.0;
-    costmap_frame_id_ = msg->header.frame_id;
-    costmap_resolution_ = msg->info.resolution;
-    costmap_min_x_ = msg->info.origin.position.x;
-    costmap_min_y_ = msg->info.origin.position.y;
-    costmap_max_x_ = costmap_min_x_ + static_cast<double>(msg->info.width) * msg->info.resolution;
-    costmap_max_y_ = costmap_min_y_ + static_cast<double>(msg->info.height) * msg->info.resolution;
-    if (should_plan_ && has_valid_global_path_) {
-        needs_replan_ = true;
+    // —— 1. 仅在 data_mutex_ 下写元数据；不持有该锁调入 ego_planner_，
+    //       否则费时的 setNav2InflatedOccupancyGridMap 会和 makePlan 的锁串成死锁链。
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        map_from_costmap_ = true;
+        has_costmap_bounds_ = msg->info.width > 0 && msg->info.height > 0 && msg->info.resolution > 0.0;
+        costmap_frame_id_ = msg->header.frame_id;
+        costmap_resolution_ = msg->info.resolution;
+        costmap_min_x_ = msg->info.origin.position.x;
+        costmap_min_y_ = msg->info.origin.position.y;
+        costmap_max_x_ = costmap_min_x_ + static_cast<double>(msg->info.width) * msg->info.resolution;
+        costmap_max_y_ = costmap_min_y_ + static_cast<double>(msg->info.height) * msg->info.resolution;
+        if (should_plan_ && has_valid_global_path_) {
+            needs_replan_ = true;
+        }
+
+        if (!flag_) {
+            flag_ = true;
+        }
+
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "收到 OccupancyGrid 地图: %u x %u, resolution=%.3f, origin=(%.3f, %.3f), "
+            "bounds_x=[%.3f, %.3f), bounds_y=[%.3f, %.3f), frame=%s, topic=%s",
+            msg->info.width,
+            msg->info.height,
+            msg->info.resolution,
+            msg->info.origin.position.x,
+            msg->info.origin.position.y,
+            costmap_min_x_,
+            costmap_max_x_,
+            costmap_min_y_,
+            costmap_max_y_,
+            msg->header.frame_id.c_str(),
+            map_topic_.c_str());
     }
 
-    if (!flag_) {
-        flag_ = true;
+    // —— 2. 把 OccupancyGrid 写入 ego_planner_->grid_map_：与 makePlan / getObstacles 互斥，
+    //       但不会和 data_mutex_ 互锁。
+    {
+        std::lock_guard<std::mutex> plock(planner_mutex_);
+        ego_planner_->setNav2InflatedOccupancyGridMap(*msg);
     }
-
-    RCLCPP_INFO_THROTTLE(
-        this->get_logger(),
-        *this->get_clock(),
-        5000,
-        "收到 OccupancyGrid 地图: %u x %u, resolution=%.3f, origin=(%.3f, %.3f), "
-        "bounds_x=[%.3f, %.3f), bounds_y=[%.3f, %.3f), frame=%s, topic=%s",
-        msg->info.width,
-        msg->info.height,
-        msg->info.resolution,
-        msg->info.origin.position.x,
-        msg->info.origin.position.y,
-        costmap_min_x_,
-        costmap_max_x_,
-        costmap_min_y_,
-        costmap_max_y_,
-        msg->header.frame_id.c_str(),
-        map_topic_.c_str());
 }
 
 // 处理2D Nav Goal - 生成从起点到目标的直线路
@@ -440,121 +450,145 @@ void TrajectoryAndObstaclesPublisher::rviz_global_path_callback(const nav_msgs::
 }
 
 // 核心逻辑：检查数据更新→触发规划→发布结果
+//
+// 死锁修复（方案一：把 makePlan 移出 data_mutex_）
+//   原版：整个函数持 data_mutex_，直到 makePlan() 返回；如果 makePlan 卡死
+//        在 A* / LBFGS 里，所有 callback (costmap_callback, rviz_global_path_callback,
+//        ...) 全部排队等锁 → 节点僵死。
+//   现版：拆成 4 段
+//     1) 在 data_mutex_ 下做"快照"，把规划所需输入拷出来；
+//     2) 释放 data_mutex_，在 planner_mutex_ 下跑 makePlan + 取结果；
+//     3) 再加 data_mutex_ 把 a_star_pathes_ 写回；
+//     4) 调 publish_*（每个内部各自取需要的锁）。
+//   data_mutex_ 与 planner_mutex_ 任意时刻最多持有一把，绝对不嵌套。
 void TrajectoryAndObstaclesPublisher::publish_and_plan()
 {
-    std::lock_guard<std::mutex> lock(data_mutex_);
-
-    // 如果有全局路径且应该规划，并且需要重新规划，则进行规划
-    if (needs_replan_ && has_valid_global_path_ && !global_plan_traj_.empty())
+    // ========== 1. 快照阶段（持 data_mutex_） ==========
+    std::vector<PathPoint> global_traj_snap;
+    PathPoint cur_pose_snap;
+    bool need_plan        = false;
+    bool need_init_grid   = false;
+    bool map_received     = false;
+    std::string map_topic_copy;
     {
-        a_star_pathes_.clear();
-        // 设置全局路径
-        if (!global_plan_traj_.empty())
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (needs_replan_ && has_valid_global_path_ && !global_plan_traj_.empty()) {
+            global_traj_snap = global_plan_traj_;       // 拷一份，避免在解锁后被其他 callback 改
+            cur_pose_snap    = cur_pose_;
+            need_plan        = true;
+            // 在这里就把 needs_replan_ 置 false：即使 makePlan 长耗时，期间
+            // 来的新路径会再次置 true，不会被覆盖
+            needs_replan_    = false;
+            need_init_grid   = (!flag_ && !map_from_costmap_);
+            if (need_init_grid) flag_ = true;
+            map_received     = map_from_costmap_;
+            map_topic_copy   = map_topic_;
+        }
+    }
+
+    // ========== 2. 重活阶段（持 planner_mutex_，不持 data_mutex_） ==========
+    std::vector<std::vector<Eigen::Vector2d>> a_star_pathes_snap;
+    std::vector<PathPoint> debug_planned_traj;
+    if (need_plan) {
+        // —— 2a. 路径预处理：纯本地操作，不需要任何锁 ——
+        std::vector<PathPoint> global_plan_traj_temp;
+        discretize_trajectory(global_traj_snap, global_plan_traj_temp, path_sample_interval_);
+
+        float mindist = 100000000;
+        int minddex = 0;
+        for (int i = 0; i < static_cast<int>(global_plan_traj_temp.size()); i++) {
+            double dist = distance(global_plan_traj_temp[i], cur_pose_snap);
+            if (dist < mindist) {
+                mindist = dist;
+                minddex = i;
+            }
+        }
+
+        std::vector<PathPoint> global_plan_traj_after;
+        global_plan_traj_after.push_back(cur_pose_snap);
+
+        size_t start_index = static_cast<size_t>(minddex);
+        if (start_index + 1 < global_plan_traj_temp.size()) {
+            const auto & closest = global_plan_traj_temp[start_index];
+            const auto & next = global_plan_traj_temp[start_index + 1];
+            const double tangent_x = next.x - closest.x;
+            const double tangent_y = next.y - closest.y;
+            const double closest_from_robot_x = closest.x - cur_pose_snap.x;
+            const double closest_from_robot_y = closest.y - cur_pose_snap.y;
+            if (tangent_x * closest_from_robot_x + tangent_y * closest_from_robot_y < 0.0) {
+                ++start_index;
+            }
+        }
+
+        PathPoint last_point = cur_pose_snap;
+        double accumulated_distance = 0.0;
+        const bool limit_horizon = local_planning_horizon_ > 0.0;
+        for (size_t i = start_index; i < global_plan_traj_temp.size(); i++) {
+            const auto & next_point = global_plan_traj_temp[i];
+            const double segment_length = distance(last_point, next_point);
+            if (segment_length < 1e-6) {
+                continue;
+            }
+
+            if (limit_horizon &&
+                accumulated_distance + segment_length > local_planning_horizon_)
+            {
+                const double remaining = local_planning_horizon_ - accumulated_distance;
+                if (remaining > 1e-6) {
+                    const double ratio = remaining / segment_length;
+                    PathPoint horizon_point;
+                    horizon_point.x = last_point.x + ratio * (next_point.x - last_point.x);
+                    horizon_point.y = last_point.y + ratio * (next_point.y - last_point.y);
+                    horizon_point.z = last_point.z + ratio * (next_point.z - last_point.z);
+                    horizon_point.v = last_point.v + ratio * (next_point.v - last_point.v);
+                    global_plan_traj_after.push_back(horizon_point);
+                }
+                break;
+            }
+
+            global_plan_traj_after.push_back(next_point);
+            accumulated_distance += segment_length;
+            last_point = next_point;
+        }
+        discretize_trajectory(global_plan_traj_after, global_plan_traj_temp, path_sample_interval_);
+
+        // —— 2b. 真正调 ego_planner_：持 planner_mutex_ ——
         {
-            std::vector<PathPoint> global_plan_traj_temp;
-
-
-            discretize_trajectory(global_plan_traj_, global_plan_traj_temp, path_sample_interval_);
-             
-            float mindist = 100000000;
-            int minddex = 0;
-            for(int i = 0; i < global_plan_traj_temp.size();i++)
-            {
-                double dist =  distance(global_plan_traj_temp[i], cur_pose_); 
-                if(dist < mindist)
-                {
-                    mindist = dist;
-                    minddex = i;
-                } 
-  
-            }
-
-            std::vector<PathPoint> global_plan_traj_after;
-            global_plan_traj_after.push_back(cur_pose_);
-
-            size_t start_index = static_cast<size_t>(minddex);
-            if (start_index + 1 < global_plan_traj_temp.size()) {
-                const auto & closest = global_plan_traj_temp[start_index];
-                const auto & next = global_plan_traj_temp[start_index + 1];
-                const double tangent_x = next.x - closest.x;
-                const double tangent_y = next.y - closest.y;
-                const double closest_from_robot_x = closest.x - cur_pose_.x;
-                const double closest_from_robot_y = closest.y - cur_pose_.y;
-                if (tangent_x * closest_from_robot_x + tangent_y * closest_from_robot_y < 0.0) {
-                    ++start_index;
-                }
-            }
-
-            PathPoint last_point = cur_pose_;
-            double accumulated_distance = 0.0;
-            const bool limit_horizon = local_planning_horizon_ > 0.0;
-            for(size_t i = start_index; i < global_plan_traj_temp.size(); i++)
-            {
-                const auto & next_point = global_plan_traj_temp[i];
-                const double segment_length = distance(last_point, next_point);
-                if (segment_length < 1e-6) {
-                    continue;
-                }
-
-                if (limit_horizon &&
-                    accumulated_distance + segment_length > local_planning_horizon_)
-                {
-                    const double remaining = local_planning_horizon_ - accumulated_distance;
-                    if (remaining > 1e-6) {
-                        const double ratio = remaining / segment_length;
-                        PathPoint horizon_point;
-                        horizon_point.x = last_point.x + ratio * (next_point.x - last_point.x);
-                        horizon_point.y = last_point.y + ratio * (next_point.y - last_point.y);
-                        horizon_point.z = last_point.z + ratio * (next_point.z - last_point.z);
-                        horizon_point.v = last_point.v + ratio * (next_point.v - last_point.v);
-                        global_plan_traj_after.push_back(horizon_point);
-                    }
-                    break;
-                }
-
-                global_plan_traj_after.push_back(next_point);
-                accumulated_distance += segment_length;
-                last_point = next_point;
-            }
-            discretize_trajectory(global_plan_traj_after, global_plan_traj_temp, path_sample_interval_);
-
+            std::lock_guard<std::mutex> plock(planner_mutex_);
             ego_planner_->setPathPoint(global_plan_traj_temp);
+            if (need_init_grid) {
+                // only call once
+                ego_planner_->setGridMap(cur_pose_snap);
+            }
+            ego_planner_->setCurrentVehiclePos(cur_pose_snap);
+
+            // 触发 Ego Planner 规划
+            ego_planner_->makePlan();
+
+            ego_planner_->getAStarPath(a_star_pathes_snap);
+            ego_planner_->getLocalPlanTrajResults(debug_planned_traj);
         }
-        // std::cout << "cur_pose_x =" << cur_pose_.x << "cur_pose_y =" << cur_pose_.y << std::endl;
-        if(!flag_ && !map_from_costmap_)
-        {
-            // only call once
-            ego_planner_->setGridMap(cur_pose_);
-            flag_ = true;
-        }
-        if (!map_from_costmap_) {
+
+        if (!map_received) {
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
                 2000,
                 "尚未收到 OccupancyGrid 地图，Ego-Planner 正在使用初始化地图；请检查 map_topic=%s",
-                map_topic_.c_str());
+                map_topic_copy.c_str());
         }
-        ego_planner_->setCurrentVehiclePos(cur_pose_);
 
-        // 触发Ego Planner规划
-        ego_planner_->makePlan();
-
-        ego_planner_->getAStarPath(a_star_pathes_);
-
-        std::vector<PathPoint> debug_planned_traj;
-        ego_planner_->getLocalPlanTrajResults(debug_planned_traj);
         if (debug_planned_traj.empty()) {
             RCLCPP_WARN(
                 this->get_logger(),
                 "Ego-Planner 本次规划未生成 trajectory: trajectory_generated=false, "
                 "global_path=%zu, "
                 "a_star_paths=%zu, map_received=%s, cur=(%.3f, %.3f)",
-                global_plan_traj_.size(),
-                a_star_pathes_.size(),
-                map_from_costmap_ ? "true" : "false",
-                cur_pose_.x,
-                cur_pose_.y);
+                global_traj_snap.size(),
+                a_star_pathes_snap.size(),
+                map_received ? "true" : "false",
+                cur_pose_snap.x,
+                cur_pose_snap.y);
         } else {
             const auto & first = debug_planned_traj.front();
             const auto & last = debug_planned_traj.back();
@@ -570,24 +604,24 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
                 last.x,
                 last.y,
                 last.v,
-                a_star_pathes_.size());
+                a_star_pathes_snap.size());
         }
 
         RCLCPP_INFO_THROTTLE(
                    this->get_logger(),
                    *this->get_clock(),
                    2000,
-                   "规划完成! 路径点: %zu", 
-                   global_plan_traj_.size());
-        
-        // 规划完成后，重置重新规划标志，但保持 should_plan_ 为 true
-        // 这样下次有数据更新时可以自动重新规划
-        // needs_replan_ = false;
-        needs_replan_ = false;
+                   "规划完成! 路径点: %zu",
+                   global_traj_snap.size());
 
+        // ========== 3. 写回阶段（再持 data_mutex_） ==========
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            a_star_pathes_ = std::move(a_star_pathes_snap);
+        }
     }
 
-    // 发布所有可视化数据（无论是否更新，保持实时显示）
+    // ========== 4. 发布阶段（每个 publish_* 自己取需要的锁） ==========
     publish_global_path();
     publish_planned_trajectory();
     publish_a_star_path();
@@ -597,13 +631,18 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
 // 发布可视化全局路径
 void TrajectoryAndObstaclesPublisher::publish_global_path()
 {
-    // if (global_plan_traj_.empty()) return;
+    // 在锁内拷一份本地副本，再释放锁后做 ROS 发布，避免持锁期间被其他 callback 等待
+    std::vector<PathPoint> traj_copy;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        traj_copy = global_plan_traj_;
+    }
 
     nav_msgs::msg::Path visual_path;
     visual_path.header.stamp = this->now();
     visual_path.header.frame_id = frame_id_;
 
-    for (const auto& path_point : global_plan_traj_)
+    for (const auto& path_point : traj_copy)
     {
         geometry_msgs::msg::PoseStamped pose;
         pose.header = visual_path.header;
@@ -626,8 +665,15 @@ void TrajectoryAndObstaclesPublisher::publish_global_path()
 
 void TrajectoryAndObstaclesPublisher::publish_a_star_path()
 {
+    // 锁内拷一份再发，避免持锁做 ROS publish
+    std::vector<std::vector<Eigen::Vector2d>> paths_copy;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        paths_copy = a_star_pathes_;
+    }
+
     // 如果没有路径数据，直接返回
-    if (a_star_pathes_.empty())
+    if (paths_copy.empty())
     {
       RCLCPP_DEBUG_THROTTLE(
         this->get_logger(),
@@ -641,9 +687,9 @@ void TrajectoryAndObstaclesPublisher::publish_a_star_path()
     visualization_msgs::msg::MarkerArray marker_array_msg;
 
     // 遍历 a_star_pathes_ 中的每一条路径
-    for (size_t i = 0; i < a_star_pathes_.size(); ++i)
+    for (size_t i = 0; i < paths_copy.size(); ++i)
     {
-      const std::vector<Eigen::Vector2d>& current_path = a_star_pathes_[i];
+      const std::vector<Eigen::Vector2d>& current_path = paths_copy[i];
 
       // 1. 创建一个Marker对象
       visualization_msgs::msg::Marker marker;
@@ -689,8 +735,12 @@ void TrajectoryAndObstaclesPublisher::publish_a_star_path()
 // 发布Ego Planner规划后的局部轨迹
 void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
 {
-    planned_traj.clear();
-    ego_planner_->getLocalPlanTrajResults(planned_traj);
+    // 在 planner_mutex_ 下拿一份本地副本，离开锁后再做发布
+    std::vector<PathPoint> planned_traj;
+    {
+        std::lock_guard<std::mutex> plock(planner_mutex_);
+        ego_planner_->getLocalPlanTrajResults(planned_traj);
+    }
 
     nav_msgs::msg::Path visual_traj;
     visual_traj.header.stamp = this->now();
@@ -830,8 +880,13 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
 
 void TrajectoryAndObstaclesPublisher::publish_local_obstacles()
 {
+    // grid_map_ 的读取必须在 planner_mutex_ 下进行，
+    // 否则与 costmap_callback 的写入构成数据竞争
     std::vector<ObstacleInfo> obstacles;
-    ego_planner_->getObstacles(obstacles);
+    {
+        std::lock_guard<std::mutex> plock(planner_mutex_);
+        ego_planner_->getObstacles(obstacles);
+    }
 
     if (obstacles.empty()) return;
 

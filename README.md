@@ -10,7 +10,7 @@
 * loam_interface 对点云的坐标系从lidar_odom_到odom的转换,发布从odom到lidar的odometry：lidar_odometry
 * sensor_scan_generation 点云的坐标系从odom到lidar的转换，发布从odom到robot_base(gimbal)的odometry:odometry
 * rm_decision_cpp 决策模块
-* auto_aim_interfaces & rm_interfaces 消息定义
+* auto_aim_interfaces & rm_interfaces & ego_planner_interface消息定义
 * pd_omni_pid_pursuit_controller 控制器插件
 * ign_sim_pointcloud_tool 仿真点云处理工具
 * small_gicp_relocalization 重定位模块
@@ -21,7 +21,6 @@
 * cpp_lidar_filter 去除车身点云
 * nav2_mppi_ego_controller MPPI控制器插件
 * ego_planner Ego B-spline 规划器插件
-* ego_planner_interface Ego B-spline 规划器接口插件
 
 > ## 待处理问题
 >

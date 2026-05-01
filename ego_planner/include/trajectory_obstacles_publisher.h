@@ -107,7 +107,10 @@ private:
 
     // 数据存储
     std::vector<PathPoint> global_plan_traj_;
-    std::mutex data_mutex_;
+    std::mutex data_mutex_;          // 保护本类成员（轻量元数据）
+    std::mutex planner_mutex_;       // 保护 ego_planner_ 内部状态（grid_map_ / 优化器），
+                                     // 只在调用 ego_planner_ 的成员方法时持有，
+                                     // 与 data_mutex_ 互不嵌套（避免 AB/BA 死锁）
     bool has_valid_global_path_;
     bool should_plan_;
     bool needs_replan_;  // 新增：是否需要重新规划的标志
