@@ -166,18 +166,33 @@ def generate_launch_description():
                     'leaf_size': 0.05   # 降采样
                 }]
             ),
+            # Node(
+            #     package='cpp_lidar_filter_pcd2',
+            #     executable='lidar_filter_node_pcd2',
+            #     name='my_lidar_filter_pcd2',
+            #     output='screen',
+            #     parameters=[{
+            #         'input_topic': 'livox/lidar',
+            #         'output_topic': 'livox/lidar_filtered',
+            #         'min_x': -0.5, 'max_x': 0.2,
+            #         'min_y': -0.25, 'max_y': 0.25,
+            #         'min_z': -0.2, 'max_z': 0.27,
+            #         'negative': True,   # 挖掉车身
+            #         'leaf_size': 0.05   # 降采样
+            #     }]
+            # ),
 
-            Node(
-                package='foxglove_bridge',       # 对应的 ROS 2 包名
-                executable='foxglove_bridge',    # 可执行文件名
-                name='foxglove_bridge',          # 运行时的节点名称
-                output='screen',                 # 将日志输出到终端屏幕
-                parameters=[{
-                    'port': 8765,                # WebSocket 监听端口 (默认 8765)
-                    'address': '0.0.0.0',        # 允许所有 IP 连接 (局域网内其他电脑可连)
-                    'tls': False,                # 局域网调试通常关闭 TLS 加密
-                }]
-            ),
+            # Node(
+            #     package='foxglove_bridge',       # 对应的 ROS 2 包名
+            #     executable='foxglove_bridge',    # 可执行文件名
+            #     name='foxglove_bridge',          # 运行时的节点名称
+            #     output='screen',                 # 将日志输出到终端屏幕
+            #     parameters=[{
+            #         'port': 8765,                # WebSocket 监听端口 (默认 8765)
+            #         'address': '0.0.0.0',        # 允许所有 IP 连接 (局域网内其他电脑可连)
+            #         'tls': False,                # 局域网调试通常关闭 TLS 加密
+            #     }]
+            # ),
 
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(

@@ -30,6 +30,7 @@ def generate_launch_description():
     # Get the launch directory
     bringup_dir = get_package_share_directory("pb2025_nav_bringup")
     ego_planner_dir = get_package_share_directory("ego_planner")
+    mid360_deskew_dir = get_package_share_directory("mid360_deskew")
     launch_dir = os.path.join(bringup_dir, "launch")
 
     # Create the launch configuration variables
@@ -261,6 +262,16 @@ def generate_launch_description():
         }.items(),
     )
 
+    mid360_deskew_cmd = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(mid360_deskew_dir, "launch", "mid360_deskew.launch.py")
+        ),
+        launch_arguments={
+            "namespace": namespace,
+            "config_file": os.path.join(mid360_deskew_dir, "config", "mid360_deskew_odom_imu.yaml"),
+        }.items(),
+    )
+
     joy_teleop_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "joy_teleop_launch.py")),
         launch_arguments={
@@ -297,10 +308,10 @@ def generate_launch_description():
     ld.add_action(declare_use_respawn_cmd)
 
     # Add the actions to launch all of the navigation nodes
-    ld.add_action(start_velodyne_convert_tool)
+    # ld.add_action(start_velodyne_convert_tool)
     ld.add_action(bringup_cmd)
     ld.add_action(ego_planner_cmd)
     ld.add_action(joy_teleop_cmd)
     ld.add_action(rviz_cmd)
-
+    # ld.add_action(mid360_deskew_cmd)
     return ld

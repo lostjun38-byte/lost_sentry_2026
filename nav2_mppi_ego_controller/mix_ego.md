@@ -90,22 +90,55 @@ critics:
 
 EgoTrajectoryCritic:
   enabled: true
+  cost_power: 1
+  cost_weight: 8.0
+
   ego_trajectory_topic: "/ego_reference_trajectory"
-  max_reference_age: 1.0
+
+  position_weight: 1.0
+  yaw_weight: 0.1
+  velocity_weight: 0.2
+  velocity_direction_weight: 0.4
+  velocity_direction_min_speed: 0.05
+
+  use_curvature_cost: true
+  curvature_weight: 0.1
+  max_reference_curvature: 5.0
+  max_candidate_curvature: 8.0
+
+  use_acceleration_cost: false
+  acceleration_weight: 0.05
+  max_reference_acceleration: 5.0
+  max_candidate_acceleration: 8.0
+
+  velocity_frame: "base"
+
+  max_reference_age: 0.5
   lookahead_time: 1.0
   max_match_distance: 1.0
   reference_dt: 0.1
-  max_reference_speed: 2.5
-  trajectory_point_step: 2
-  cost_power: 1
-  cost_weight: 8.0
-  position_weight: 1.0
-  yaw_weight: 0.0
-  velocity_weight: 0.5
-  velocity_direction_weight: 0.3
-  velocity_direction_min_speed: 0.05
-  distance_penalty_weight: 15.0
+  max_reference_speed: 3.0
+  trajectory_point_step: 1
+  distance_penalty_weight: 10.0
+
+  debug_enabled: false
+  debug_log_period: 1.0
+  debug_sample_candidates: 3
+  debug_check_trajectory_on_callback: true
+  debug_check_score_runtime: true
+  debug_max_point_gap: 1.0
+  debug_min_point_gap: 0.001
+  debug_max_yaw_jump: 1.57
+  debug_max_speed_jump: 2.0
+  debug_max_curvature: 8.0
+  debug_max_acceleration: 10.0
+  debug_max_cost: 1000000.0
+  debug_large_error_distance: 2.0
 ```
+
+对全向底盘，`yaw_weight` 通常应低一些，避免强迫车体朝向贴死参考；`velocity_direction_weight`
+可以相对更高，让 MPPI 更重视沿 Ego-Planner / B-spline 的切线速度方向行进。新增曲率约束利用
+B-spline 的平滑性引导候选轨迹保持连续转弯；加速度约束默认关闭，适合作为弱约束逐步加权。
 
 Ego-Planner 节点参数：
 

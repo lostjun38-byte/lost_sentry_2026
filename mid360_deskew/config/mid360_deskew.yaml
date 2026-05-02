@@ -1,0 +1,60 @@
+# 兼容入口配置：内容与 mid360_deskew_odom_imu.yaml 保持一致
+mid360_deskew_node:
+  ros__parameters:
+    use_sim_time: false  # 是否使用仿真时间；真实机器人通常为 false
+
+    input_cloud_topic: "/mid360/points"  # MID360 原始 PointCloud2 输入话题
+    output_cloud_topic: "/mid360/points_deskewed"  # 去畸变后 PointCloud2 输出话题
+    odom_topic: "/odom"  # Odin1 或主定位系统发布的 odom 话题
+    imu_topic: "/mid360/imu"  # MID360 内置 IMU 输入话题
+
+    fixed_frame: "odom"  # 固定参考坐标系；local_costmap 推荐使用 odom
+    base_frame: "base_link"  # 机器人本体坐标系，odom 位姿应表示 odom -> base_link
+    lidar_frame: "mid360_link"  # MID360 点云输出坐标系，也是去畸变输出 frame_id
+    imu_frame: "mid360_imu_link"  # MID360 IMU 坐标系；若 IMU 已在 lidar_frame 下表达，可设为 mid360_link
+
+    deskew_method: "odom_imu"  # 去畸变模式：odom / imu_only / odom_imu；本文件使用增强模式
+    fallback_method: "odom"  # 主模式失败时的降级模式：none / odom / imu_only / linear
+    deskew_target_time: "scan_end"  # 统一补偿参考时刻：scan_start / scan_mid / scan_end
+
+    rotation_source: "imu"  # odom_imu 模式的旋转来源：imu / odom / fused；默认使用 IMU 高频旋转
+    translation_source: "odom"  # odom_imu 模式的平移来源；当前只实现 odom
+
+    point_time_field: "offset_time"  # 每点时间字段优先名称；若不存在会尝试 offset_time/time/timestamp/t
+    point_time_unit: "nanosecond"  # 每点时间单位：second / millisecond / microsecond / nanosecond
+    cloud_stamp_type: "scan_start"  # cloud.header.stamp 语义：scan_start 或 scan_end
+
+    cloud_time_offset: 0.0  # 点云 header.stamp 时间修正，单位秒
+    odom_time_offset: 0.0  # 查询 odom 时相对点云时间的修正，单位秒
+    imu_time_offset: 0.0  # 查询 IMU 时相对点云时间的修正，单位秒
+
+    pose_buffer_duration: 5.0  # odom 位姿缓存时长，单位秒
+    imu_buffer_duration: 5.0  # IMU 缓存时长，单位秒
+    max_allowed_time_gap: 0.05  # odom 插值允许的最大相邻样本间隔，超过则失败
+    max_allowed_imu_gap: 0.02  # IMU 积分允许的最大相邻样本间隔，超过则失败
+    allow_extrapolation: false  # 是否允许 odom 外推；默认不允许，避免静默错误
+
+    estimate_gyro_bias: true  # 是否在启动初期估计陀螺零偏
+    gyro_bias_estimation_duration: 2.0  # 陀螺零偏估计窗口时长，单位秒
+    gyro_bias_static_threshold: 0.05  # 判断静止的角速度模长阈值，单位 rad/s
+    use_acc_for_translation: false  # 是否用 IMU 加速度积分平移；第一版不实现，应保持 false
+
+    min_range: 0.05  # 保留点的最小距离，单位米；更近点设为 NaN
+    max_range: 5.0  # 保留点的最大距离，单位米；更远点设为 NaN
+    remove_nan: true  # 是否将 NaN/Inf 输入点写为 NaN
+    filter_mode: "keep_size_nan"  # 距离过滤模式；保持点云尺寸并将无效点写为 NaN
+
+    drop_if_no_point_time: true  # 没有每点时间字段时是否丢帧
+    drop_if_no_pose: true  # 缺 odom 位姿或无法插值时是否丢帧
+    drop_if_no_imu: false  # 缺 IMU 时是否丢帧；增强模式默认允许 fallback 到 odom
+    publish_raw_when_failed: false  # 失败时是否发布原始点云；默认不发布，避免误认为已去畸变
+
+    enable_time_check: true  # 是否启用 cloud/odom/imu 时间延迟自检
+    time_check_window: 3.0  # 时间自检统计窗口，单位秒
+    time_check_min_samples: 20  # 输出时间自检结果前所需的最小样本数
+    apply_auto_time_offset: false  # 是否临时应用自动估计时间偏移；不会覆盖 YAML 原值
+    auto_time_offset_max_abs: 0.1  # 自动时间偏移允许的最大绝对值，单位秒
+    delay_jitter_warning_threshold: 0.01  # 延迟标准差告警阈值，单位秒
+    print_time_check_result: true  # 是否打印时间自检统计和推荐 offset
+
+    enable_debug_log: true  # 是否打印字段检测、时间范围、buffer 状态和 deskew 状态日志

@@ -445,21 +445,50 @@ controller_server:
       critics: ["ObstaclesCritic", "EgoTrajectoryCritic", "GoalCritic", "PathAlignCritic", "PathFollowCritic", "TwirlingCritic"]
       EgoTrajectoryCritic:
         enabled: true
+        cost_power: 1
+        cost_weight: 8.0
+
         ego_trajectory_topic: "/ego_reference_trajectory"
-        max_reference_age: 1.0
+
+        position_weight: 1.0
+        yaw_weight: 0.1
+        velocity_weight: 0.2
+        velocity_direction_weight: 0.4
+        velocity_direction_min_speed: 0.05
+
+        use_curvature_cost: true
+        curvature_weight: 0.1
+        max_reference_curvature: 5.0
+        max_candidate_curvature: 8.0
+
+        use_acceleration_cost: true
+        acceleration_weight: 0.05
+        max_reference_acceleration: 5.0
+        max_candidate_acceleration: 8.0
+
+        velocity_frame: "base"
+
+        max_reference_age: 0.5
         lookahead_time: 1.0
         max_match_distance: 1.0
         reference_dt: 0.1
-        max_reference_speed: 2.5
-        trajectory_point_step: 2
-        cost_power: 1
-        cost_weight: 8.0
-        position_weight: 1.0
-        yaw_weight: 0.0
-        velocity_weight: 0.5
-        velocity_direction_weight: 0.3
-        velocity_direction_min_speed: 0.05  #当候选轨迹点的速度大小低于这个值时，不计算“速度方向”和 Ego 轨迹切线方向的差异，因为速度太小时方向本身很容易抖动，算出来没有意义
-        distance_penalty_weight: 15.0  # “超出最大匹配距离时”的额外惩罚权重
+        max_reference_speed: 3.0
+        trajectory_point_step: 1
+        distance_penalty_weight: 10.0
+
+        debug_enabled: false
+        debug_log_period: 1.0
+        debug_sample_candidates: 3
+        debug_check_trajectory_on_callback: true
+        debug_check_score_runtime: true
+        debug_max_point_gap: 1.0
+        debug_min_point_gap: 0.001
+        debug_max_yaw_jump: 1.57
+        debug_max_speed_jump: 2.0
+        debug_max_curvature: 8.0
+        debug_max_acceleration: 10.0
+        debug_max_cost: 1000000.0
+        debug_large_error_distance: 2.0
       GoalCritic:
         enabled: true
         cost_power: 1
@@ -529,7 +558,7 @@ local_costmap:
       height: 10
       resolution: 0.05
       robot_radius: 0.2
-      plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
+      plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] 
       intensity_voxel_layer:
         plugin: pb_nav2_costmap_2d::IntensityVoxelLayer
         enabled: true
@@ -557,6 +586,47 @@ local_costmap:
           max_obstacle_height: 2.0
           obstacle_max_range: 5.0
           obstacle_min_range: 0.5
+      # stvl_voxel_layer:
+      #   plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
+      #   enabled: true
+      #   voxel_decay: 2.0     #seconds if linear, e^n if exponential
+      #   decay_model: 0      #0=linear, 1=exponential, 2=persistent
+      #   voxel_size: 0.05   #meters
+      #   track_unknown_space: true   #default space is unknown
+      #   observation_persistence: 0.0  #seconds
+      #   max_obstacle_height: 2.0    #meters
+      #   mark_threshold: 0      #voxel height
+      #   update_footprint_enabled: true
+      #   combination_method: 1      #1=max, 0=override
+      #   obstacle_range: 5.0    #meters
+      #   origin_z: 0.0    #meters
+      #   publish_voxel_map: false   # default off
+      #   transform_tolerance: 0.2    # seconds
+      #   mapping_mode: false  # default off, saves map not for navigation
+      #   map_save_duration: 60.0     #default 60s, how often to autosave
+      #   observation_sources: livox_source 
+      #   livox_source:
+      #     data_type: PointCloud2
+      #     topic: "/red_standard_robot1/livox/lidar_filtered"
+      #     transport_type: "raw"        #default raw -No compression-, Options: zlib, draco, zstd
+      #     marking: true
+      #     clearing: true
+
+      #     obstacle_range: 5.0
+      #     raytrace_range: 6.0
+
+      #     min_obstacle_height: 0.15     #default 0, meters
+      #     max_obstacle_height: 2.0     #defaule 3, meters
+      #     expected_update_rate: 0.0    #default 0, if not updating at this rate at least, remove from buffer
+      #     observation_persistence: 0.0 #default 0, use all measurements taken during now-value, 0=latest
+      #     inf_is_valid: false          #default false, for laser scans
+      #     clear_after_reading: true    #default false, clear the buffer after the layer gets readings from it
+      #     filter: "voxel"              #default passthrough, apply "voxel", "passthrough", or no filter to sensor data, recommended to have at one filter on
+      #     voxel_min_points: 0          #default 0, minimum points per voxel for voxel filter
+      #     model_type: 1
+      #     vertical_fov_angle: 1.03      #default 0.7, radians
+      #     vertical_fov_offset: 0.0
+      #     horizontal_fov_angle: 6.28
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
