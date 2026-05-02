@@ -1,6 +1,9 @@
 #include "bspline_opt/bspline_optimizer.h"
 #include "bspline_opt/gradient_descent_optimizer.h"
 
+#include <cstring>
+#include <vector>
+
 namespace ego_planner
 {
 namespace
@@ -932,6 +935,11 @@ bool BsplineOptimizer::rebound_optimize()
   iter_num_ = 0;
   int start_id = order_;
   int end_id = cps_.points.cols() - order_;
+  if (end_id - start_id < 1) {
+    std::cerr << "[BsplineOptimizer::rebound_optimize] not enough free control points: cols="
+              << cps_.points.cols() << ", order=" << order_ << std::endl;
+    return false;
+  }
   variable_num_ = 2 * (end_id - start_id); // 优化变量：2*(控制点数量)
   double final_cost = 0.0;
 
@@ -950,8 +958,11 @@ bool BsplineOptimizer::rebound_optimize()
     flag_force_return = false;
     flag_occ = false;
     success = false;
-    double q[variable_num_];
-    memcpy(q, cps_.points.data() + 2 * start_id, variable_num_ * sizeof(q[0]));
+    // Heap-allocated, bounds-checked replacement for the original VLA
+    // `double q[variable_num_]`. The VLA was UB-prone whenever
+    // `variable_num_` reached 0 or a negative value via degenerate input.
+    std::vector<double> q(static_cast<std::size_t>(variable_num_));
+    std::memcpy(q.data(), cps_.points.data() + 2 * start_id, variable_num_ * sizeof(double));
 
 
     lbfgs::lbfgs_parameter_t lbfgs_params;
@@ -960,7 +971,7 @@ bool BsplineOptimizer::rebound_optimize()
     lbfgs_params.max_iterations = 200;
     lbfgs_params.g_epsilon = 0.001;
 
-    int result = lbfgs::lbfgs_optimize(variable_num_, q, &final_cost, BsplineOptimizer::costFunctionRebound, NULL, BsplineOptimizer::earlyExit, this, &lbfgs_params);
+    int result = lbfgs::lbfgs_optimize(variable_num_, q.data(), &final_cost, BsplineOptimizer::costFunctionRebound, NULL, BsplineOptimizer::earlyExit, this, &lbfgs_params);
     if (kVerboseOptimizerLog) {
       std::cout << "result =" << result << std::endl;
     }
@@ -976,7 +987,26 @@ bool BsplineOptimizer::rebound_optimize()
       UniformBspline traj = UniformBspline(cps_.points, 3, bspline_interval_);
       double tm, tmp;
       traj.getTimeSpan(tm, tmp);
-      double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm() / grid_map_->getResolution());
+      const double traj_span_length =
+          (traj.evaluateDeBoorT(tmp) - traj.evaluateDeBoorT(tm)).norm();
+      if (traj_span_length < 1e-3 || tmp <= tm) {
+        // Degenerate trajectory (start ≈ end). Treat as failure rather than
+        // marching with t_step = inf and silently passing the collision
+        // check, which used to make the planner emit a zero-progress
+        // trajectory.
+        if (kVerboseOptimizerLog) {
+          std::cerr << "[rebound_optimize] degenerate trajectory span="
+                    << traj_span_length << ", tm=" << tm << ", tmp=" << tmp << std::endl;
+        }
+        return false;
+      }
+      double t_step = (tmp - tm) * grid_map_->getResolution() / traj_span_length;
+      if (!std::isfinite(t_step) || t_step <= 0.0) {
+        if (kVerboseOptimizerLog) {
+          std::cerr << "[rebound_optimize] non-finite t_step=" << t_step << std::endl;
+        }
+        return false;
+      }
       for (double t = tm; t < tmp * 2 / 3; t += t_step)
       {
         Eigen::Vector2d ctrl_point_2d = traj.evaluateDeBoorT(t);
@@ -1038,11 +1068,16 @@ bool BsplineOptimizer::refine_optimize()
   iter_num_ = 0;
   int start_id = order_;
   int end_id = cps_.points.cols() - order_;
+  if (end_id - start_id < 1) {
+    std::cerr << "[BsplineOptimizer::refine_optimize] not enough free control points: cols="
+              << cps_.points.cols() << ", order=" << order_ << std::endl;
+    return false;
+  }
   variable_num_ = 2 * (end_id - start_id); // 2D 优化变量数量
 
-  // 提取 x、y 到 q
-  double q[variable_num_];
-  memcpy(q, cps_.points.data() + 2 * start_id, variable_num_ * sizeof(q[0]));
+  // 提取 x、y 到 q（heap-backed，替换原 VLA，避免 variable_num_ 退化时栈越界）
+  std::vector<double> q(static_cast<std::size_t>(variable_num_));
+  std::memcpy(q.data(), cps_.points.data() + 2 * start_id, variable_num_ * sizeof(double));
 
   double final_cost;
   double origin_lambda4 = lambda4_;
@@ -1057,7 +1092,7 @@ bool BsplineOptimizer::refine_optimize()
     lbfgs_params.max_iterations = 200;
     lbfgs_params.g_epsilon = 0.001;
 
-    int result = lbfgs::lbfgs_optimize(variable_num_, q, &final_cost, BsplineOptimizer::costFunctionRefine, NULL, NULL, this, &lbfgs_params);
+    int result = lbfgs::lbfgs_optimize(variable_num_, q.data(), &final_cost, BsplineOptimizer::costFunctionRefine, NULL, NULL, this, &lbfgs_params);
     if (!(result == lbfgs::LBFGS_CONVERGENCE ||
           result == lbfgs::LBFGSERR_MAXIMUMITERATION ||
           result == lbfgs::LBFGS_ALREADY_MINIMIZED ||
@@ -1070,7 +1105,21 @@ bool BsplineOptimizer::refine_optimize()
     UniformBspline traj = UniformBspline(cps_.points, 3, bspline_interval_);
     double tm, tmp;
     traj.getTimeSpan(tm, tmp);
-    double t_step = (tmp - tm) / ((traj.evaluateDeBoorT(tmp).topRows(2) - traj.evaluateDeBoorT(tm).topRows(2)).norm() / grid_map_->getResolution());
+    const double traj_span_length =
+        (traj.evaluateDeBoorT(tmp).topRows(2) - traj.evaluateDeBoorT(tm).topRows(2)).norm();
+    if (traj_span_length < 1e-3 || tmp <= tm) {
+      // Degenerate trajectory: skip the collision sweep so we don't divide
+      // by zero or silently pass an unsampled trajectory.
+      flag_safe = true;
+      ++iter_count;
+      continue;
+    }
+    double t_step = (tmp - tm) * grid_map_->getResolution() / traj_span_length;
+    if (!std::isfinite(t_step) || t_step <= 0.0) {
+      flag_safe = true;
+      ++iter_count;
+      continue;
+    }
     for (double t = tm; t < tmp * 2 / 3; t += t_step)
     {
       Eigen::Vector2d ctrl_point_2d = traj.evaluateDeBoorT(t).topRows(2);

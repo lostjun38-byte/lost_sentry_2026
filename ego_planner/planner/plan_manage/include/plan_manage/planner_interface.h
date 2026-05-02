@@ -55,6 +55,17 @@ namespace  ego_planner
 
             int continous_failures_count_{0};
 
+            // Current allocated A* node pool size. The pool must be large
+            // enough to cover the live OccupancyGrid plus a margin; otherwise
+            // AstarSearch fails the moment a costmap resize crosses the bound.
+            Eigen::Vector2i a_star_pool_size_{0, 0};
+
+            // Rebuild bspline_optimizer_rebound_->a_star_ if pool is smaller
+            // than required. Safe to call from any context that already holds
+            // the planner_mutex_ in the caller (this class itself does not
+            // own the mutex).
+            void ensureAStarPoolCovers(const Eigen::Vector2i & required);
+
             void updateTrajInfo(const UniformBspline &position_traj);
 
             void reparamBspline(UniformBspline &bspline, vector<Eigen::Vector3d> &start_end_derivative, double ratio, Eigen::MatrixXd &ctrl_pts, double &dt,

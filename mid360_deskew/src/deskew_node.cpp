@@ -2,13 +2,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
+#include <stdexcept>
 #include <sstream>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#include <sensor_msgs/msg/point_field.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
 
@@ -76,6 +81,42 @@ Eigen::Isometry3d rotationOnlyPose(const Eigen::Quaterniond & orientation)
   pose.linear() = orientation.normalized().toRotationMatrix();
   return pose;
 }
+
+template<typename PointT, typename = void>
+struct HasLivoxTag : std::false_type {};
+
+template<typename PointT>
+struct HasLivoxTag<PointT, std::void_t<decltype(std::declval<PointT>().tag)>> : std::true_type {};
+
+template<typename PointT, typename = void>
+struct HasLivoxLine : std::false_type {};
+
+template<typename PointT>
+struct HasLivoxLine<PointT, std::void_t<decltype(std::declval<PointT>().line)>> : std::true_type {};
+
+template<typename PointT>
+std::uint8_t livoxTagOrZero(const PointT & point)
+{
+  if constexpr (HasLivoxTag<PointT>::value) {
+    return point.tag;
+  }
+  return 0U;
+}
+
+template<typename PointT>
+std::uint8_t livoxLineOrZero(const PointT & point)
+{
+  if constexpr (HasLivoxLine<PointT>::value) {
+    return point.line;
+  }
+  return 0U;
+}
+
+template<typename T>
+void writePointField(std::vector<std::uint8_t> & data, std::size_t offset, const T & value)
+{
+  std::memcpy(data.data() + offset, &value, sizeof(T));
+}
 }  // namespace
 
 DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
@@ -83,7 +124,9 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
   pose_buffer_(5.0, 0.05, false),
   imu_buffer_(5.0, 0.02)
 {
+  cloud_input_type_ = declare_parameter<std::string>("cloud_input_type", "pointcloud2");
   input_cloud_topic_ = declare_parameter<std::string>("input_cloud_topic", "/mid360/points");
+  custom_cloud_topic_ = declare_parameter<std::string>("custom_cloud_topic", "/livox/lidar");
   output_cloud_topic_ = declare_parameter<std::string>("output_cloud_topic", "/mid360/points_deskewed");
   odom_topic_ = declare_parameter<std::string>("odom_topic", "/odom");
   imu_topic_ = declare_parameter<std::string>("imu_topic", "/mid360/imu");
@@ -101,6 +144,9 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
   point_time_field_ = declare_parameter<std::string>("point_time_field", "offset_time");
   point_time_unit_ = declare_parameter<std::string>("point_time_unit", "nanosecond");
   cloud_stamp_type_ = declare_parameter<std::string>("cloud_stamp_type", "scan_start");
+  custom_msg_timebase_type_ = declare_parameter<std::string>("custom_msg_timebase_type", "ros_header");
+  custom_msg_offset_unit_ = declare_parameter<std::string>("custom_msg_offset_unit", "nanosecond");
+  custom_msg_frame_id_ = declare_parameter<std::string>("custom_msg_frame_id", lidar_frame_);
 
   cloud_time_offset_ = declare_parameter<double>("cloud_time_offset", 0.0);
   odom_time_offset_config_ = declare_parameter<double>("odom_time_offset", 0.0);
@@ -115,6 +161,7 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
   gyro_bias_estimation_duration_ = declare_parameter<double>("gyro_bias_estimation_duration", 2.0);
   gyro_bias_static_threshold_ = declare_parameter<double>("gyro_bias_static_threshold", 0.05);
   use_acc_for_translation_ = declare_parameter<bool>("use_acc_for_translation", false);
+  imu_rotation_sign_ = declare_parameter<double>("imu_rotation_sign", 1.0);
 
   min_range_ = declare_parameter<double>("min_range", 0.05);
   max_range_ = declare_parameter<double>("max_range", 5.0);
@@ -135,6 +182,14 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
   print_time_check_result_ = declare_parameter<bool>("print_time_check_result", true);
 
   enable_debug_log_ = declare_parameter<bool>("enable_debug_log", true);
+
+  if (!isSupportedCloudInputType(cloud_input_type_)) {
+    RCLCPP_FATAL(
+      get_logger(),
+      "Unsupported cloud_input_type '%s'. Use 'pointcloud2' or 'custom_msg'.",
+      cloud_input_type_.c_str());
+    throw std::runtime_error("unsupported cloud_input_type: " + cloud_input_type_);
+  }
 
   if (!isSupportedDeskewMethod(deskew_method_)) {
     RCLCPP_WARN(
@@ -184,12 +239,35 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
     deskew_target_time_ = "scan_end";
   }
 
-  if (filter_mode_ != "keep_size_nan") {
+  if (filter_mode_ != "keep_size_nan" && filter_mode_ != "compact") {
     RCLCPP_WARN(
       get_logger(),
-      "Only filter_mode='keep_size_nan' is implemented. Requested '%s' will be treated as keep_size_nan.",
+      "Unsupported filter_mode '%s'. Falling back to 'keep_size_nan'.",
       filter_mode_.c_str());
     filter_mode_ = "keep_size_nan";
+  }
+
+  if (cloud_input_type_ == "pointcloud2" && filter_mode_ == "compact") {
+    RCLCPP_WARN(
+      get_logger(),
+      "filter_mode='compact' is only applied by the CustomMsg input path. PointCloud2 output keeps the original cloud layout.");
+  }
+
+  if (!isSupportedCustomMsgTimebaseType(custom_msg_timebase_type_)) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Unsupported custom_msg_timebase_type '%s'. Falling back to 'ros_header'.",
+      custom_msg_timebase_type_.c_str());
+    custom_msg_timebase_type_ = "ros_header";
+  }
+
+  double custom_msg_offset_scale = 0.0;
+  if (!customMsgOffsetUnitScale(custom_msg_offset_unit_, custom_msg_offset_scale)) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Unsupported custom_msg_offset_unit '%s'. Falling back to 'nanosecond'.",
+      custom_msg_offset_unit_.c_str());
+    custom_msg_offset_unit_ = "nanosecond";
   }
 
   if (drop_if_no_pose_ && publish_raw_when_failed_) {
@@ -205,6 +283,16 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
     use_acc_for_translation_ = false;
   }
 
+  if (std::abs(imu_rotation_sign_) < 0.5) {
+    RCLCPP_WARN(
+      get_logger(),
+      "imu_rotation_sign=%.3f is invalid. Falling back to 1.0. Use 1.0 or -1.0 for direction validation.",
+      imu_rotation_sign_);
+    imu_rotation_sign_ = 1.0;
+  } else {
+    imu_rotation_sign_ = imu_rotation_sign_ < 0.0 ? -1.0 : 1.0;
+  }
+
   pose_buffer_.configure(pose_buffer_duration_, max_allowed_time_gap_, allow_extrapolation_);
   imu_buffer_.configure(imu_buffer_duration_, max_allowed_imu_gap_);
 
@@ -215,10 +303,17 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
     output_cloud_topic_,
     rclcpp::SensorDataQoS());
 
-  cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-    input_cloud_topic_,
-    rclcpp::SensorDataQoS(),
-    std::bind(&DeskewNode::cloudCallback, this, std::placeholders::_1));
+  if (cloud_input_type_ == "pointcloud2") {
+    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+      input_cloud_topic_,
+      rclcpp::SensorDataQoS(),
+      std::bind(&DeskewNode::cloudCallback, this, std::placeholders::_1));
+  } else {
+    custom_cloud_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
+      custom_cloud_topic_,
+      rclcpp::SensorDataQoS(),
+      std::bind(&DeskewNode::customMsgCallback, this, std::placeholders::_1));
+  }
 
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
     odom_topic_,
@@ -232,8 +327,10 @@ DeskewNode::DeskewNode(const rclcpp::NodeOptions & options)
 
   RCLCPP_INFO(
     get_logger(),
-    "mid360_deskew_node started. input=%s output=%s odom=%s imu=%s fixed_frame=%s base_frame=%s lidar_frame=%s imu_frame=%s deskew_method=%s fallback_method=%s rotation_source=%s translation_source=%s",
+    "mid360_deskew_node started. cloud_input_type=%s pointcloud2_input=%s custom_input=%s output=%s odom=%s imu=%s fixed_frame=%s base_frame=%s lidar_frame=%s imu_frame=%s deskew_method=%s fallback_method=%s rotation_source=%s translation_source=%s",
+    cloud_input_type_.c_str(),
     input_cloud_topic_.c_str(),
+    custom_cloud_topic_.c_str(),
     output_cloud_topic_.c_str(),
     odom_topic_.c_str(),
     imu_topic_.c_str(),
@@ -251,6 +348,18 @@ void DeskewNode::odomCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
   if (enable_time_check_) {
     recordOdomDelay(*msg);
+  }
+
+  if (!msg->header.frame_id.empty() && msg->header.frame_id != fixed_frame_) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      5000,
+      "Odometry header.frame_id is '%s', expected fixed_frame '%s'. The node assumes odom pose is T_%s_%s.",
+      msg->header.frame_id.c_str(),
+      fixed_frame_.c_str(),
+      fixed_frame_.c_str(),
+      base_frame_.c_str());
   }
 
   if (!msg->child_frame_id.empty() && msg->child_frame_id != base_frame_) {
@@ -566,6 +675,241 @@ void DeskewNode::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr ms
   }
 }
 
+void DeskewNode::customMsgCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg)
+{
+  std_msgs::msg::Header input_header = msg->header;
+  const std::string source_frame = input_header.frame_id.empty() ?
+    (custom_msg_frame_id_.empty() ? lidar_frame_ : custom_msg_frame_id_) :
+    input_header.frame_id;
+  if (input_header.frame_id.empty()) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      5000,
+      "CustomMsg header.frame_id is empty. Using custom_msg_frame_id='%s' for diagnostics; output frame_id remains lidar_frame='%s'.",
+      source_frame.c_str(),
+      lidar_frame_.c_str());
+  }
+  input_header.frame_id = source_frame;
+  if (source_frame != lidar_frame_) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      5000,
+      "CustomMsg frame_id='%s' differs from lidar_frame='%s'. Dropping cloud because source->lidar point transform is not implemented.",
+      source_frame.c_str(),
+      lidar_frame_.c_str());
+    return;
+  }
+
+  rclcpp::Time adjusted_cloud_stamp(msg->header.stamp);
+  if (custom_msg_timebase_type_ == "custom_timebase") {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      10000,
+      "custom_msg_timebase_type='custom_timebase' is configured, but this version does not use Livox timebase to query Odin1 odom. Falling back to msg.header.stamp. Use custom_timebase only after Livox timebase is synchronized with ROS time/Odin1 odom.");
+  }
+  adjusted_cloud_stamp = adjusted_cloud_stamp + secondsToDuration(cloud_time_offset_);
+
+  if (enable_time_check_) {
+    recordCloudDelay(adjusted_cloud_stamp);
+    maybePrintTimeCheck();
+  }
+
+  const std::size_t point_count = msg->points.size();
+  if (msg->point_num != point_count) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      5000,
+      "CustomMsg point_num=%u differs from points.size()=%zu. Using points.size().",
+      msg->point_num,
+      point_count);
+  }
+
+  std::vector<DeskewPoint> points;
+  points.reserve(point_count);
+  if (point_count == 0) {
+    auto output = buildCustomOutputCloud(points, adjusted_cloud_stamp, lidar_frame_);
+    cloud_pub_->publish(output);
+    RCLCPP_WARN(get_logger(), "Deskew skipped: CustomMsg has zero points.");
+    return;
+  }
+
+  double offset_scale = 0.0;
+  if (!customMsgOffsetUnitScale(custom_msg_offset_unit_, offset_scale)) {
+    handleCustomDeskewFailure(
+      input_header,
+      points,
+      adjusted_cloud_stamp,
+      "unsupported custom_msg_offset_unit: " + custom_msg_offset_unit_);
+    return;
+  }
+
+  std::uint32_t min_offset_raw = std::numeric_limits<std::uint32_t>::max();
+  std::uint32_t max_offset_raw = 0U;
+  for (const auto & livox_point : msg->points) {
+    DeskewPoint point;
+    point.x = livox_point.x;
+    point.y = livox_point.y;
+    point.z = livox_point.z;
+    point.intensity = static_cast<float>(livox_point.reflectivity);
+    point.offset_time_raw = livox_point.offset_time;
+    point.offset_time_sec = static_cast<double>(livox_point.offset_time) * offset_scale;
+    point.tag = livoxTagOrZero(livox_point);
+    point.line = livoxLineOrZero(livox_point);
+    point.valid =
+      std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
+    points.push_back(point);
+
+    min_offset_raw = std::min(min_offset_raw, livox_point.offset_time);
+    max_offset_raw = std::max(max_offset_raw, livox_point.offset_time);
+  }
+
+  const double scan_duration =
+    static_cast<double>(max_offset_raw - min_offset_raw) * offset_scale;
+  if (scan_duration <= 0.0) {
+    handleCustomDeskewFailure(
+      input_header,
+      points,
+      adjusted_cloud_stamp,
+      "CustomMsg scan_duration <= 0 after offset_time normalization");
+    return;
+  }
+  if (scan_duration > 0.2) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      5000,
+      "CustomMsg scan_duration=%.6f s is unusually large for MID360. Check custom_msg_offset_unit and cloud_stamp_type.",
+      scan_duration);
+  }
+
+  // CustomMsg offset_time is a per-point relative offset, not an absolute ROS timestamp.
+  for (auto & point : points) {
+    point.offset_time_sec =
+      static_cast<double>(point.offset_time_raw - min_offset_raw) * offset_scale;
+  }
+
+  rclcpp::Time actual_scan_start = adjusted_cloud_stamp;
+  rclcpp::Time actual_scan_end = adjusted_cloud_stamp;
+  if (cloud_stamp_type_ == "scan_end") {
+    actual_scan_end = adjusted_cloud_stamp;
+    actual_scan_start = actual_scan_end - secondsToDuration(scan_duration);
+  } else {
+    actual_scan_start = adjusted_cloud_stamp;
+    actual_scan_end = actual_scan_start + secondsToDuration(scan_duration);
+  }
+
+  rclcpp::Time t_ref = actual_scan_end;
+  if (deskew_target_time_ == "scan_start") {
+    t_ref = actual_scan_start;
+  } else if (deskew_target_time_ == "scan_mid") {
+    t_ref = actual_scan_start + secondsToDuration(scan_duration * 0.5);
+  }
+
+  if (enable_debug_log_) {
+    logCustomMsgTiming(
+      *msg,
+      adjusted_cloud_stamp,
+      actual_scan_start,
+      actual_scan_end,
+      scan_duration,
+      min_offset_raw,
+      max_offset_raw);
+  }
+
+  Eigen::Isometry3d t_base_lidar = Eigen::Isometry3d::Identity();
+  std::string tf_reason;
+  if (!lookupBaseToLidar(t_base_lidar, tf_reason)) {
+    handleCustomDeskewFailure(
+      input_header,
+      points,
+      t_ref,
+      "failed to lookup base_link -> mid360_link extrinsic: " + tf_reason);
+    return;
+  }
+
+  DeskewTiming timing;
+  timing.actual_scan_start = actual_scan_start;
+  timing.actual_scan_end = actual_scan_end;
+  timing.t_ref = t_ref;
+  timing.scan_duration = scan_duration;
+
+  sensor_msgs::msg::PointCloud2 output;
+  std::string primary_reason;
+  FailureKind primary_failure_kind = FailureKind::Generic;
+  bool success = deskewCustomPointsWithMethod(
+    deskew_method_,
+    points,
+    timing,
+    t_base_lidar,
+    output,
+    primary_reason,
+    primary_failure_kind);
+  std::string used_method = deskew_method_;
+
+  if (!success && fallback_method_ != "none" && fallback_method_ != deskew_method_) {
+    RCLCPP_WARN(
+      get_logger(),
+      "Primary deskew_method '%s' failed for CustomMsg: %s. Trying fallback_method '%s'.",
+      deskew_method_.c_str(),
+      primary_reason.c_str(),
+      fallback_method_.c_str());
+
+    std::string fallback_reason;
+    FailureKind fallback_failure_kind = FailureKind::Generic;
+    success = deskewCustomPointsWithMethod(
+      fallback_method_,
+      points,
+      timing,
+      t_base_lidar,
+      output,
+      fallback_reason,
+      fallback_failure_kind);
+    if (success) {
+      used_method = fallback_method_;
+      RCLCPP_WARN(
+        get_logger(),
+        "CustomMsg deskew succeeded with fallback_method '%s'.",
+        fallback_method_.c_str());
+    } else {
+      handleCustomDeskewFailure(
+        input_header,
+        points,
+        t_ref,
+        "primary method '" + deskew_method_ + "' failed: " + primary_reason +
+          "; fallback method '" + fallback_method_ + "' failed: " + fallback_reason,
+        fallback_failure_kind);
+      return;
+    }
+  } else if (!success) {
+    handleCustomDeskewFailure(
+      input_header,
+      points,
+      t_ref,
+      "method '" + deskew_method_ + "' failed: " + primary_reason,
+      primary_failure_kind);
+    return;
+  }
+
+  cloud_pub_->publish(output);
+
+  if (enable_debug_log_) {
+    RCLCPP_INFO(
+      get_logger(),
+      "CustomMsg deskew success: method=%s stamp=%s frame=%s input_points=%zu output_points=%u",
+      used_method.c_str(),
+      stampToString(t_ref).c_str(),
+      lidar_frame_.c_str(),
+      point_count,
+      output.width);
+    logPoseBufferStatus("custom_msg deskew success");
+    logImuBufferStatus("custom_msg deskew success");
+  }
+}
+
 bool DeskewNode::deskewWithMethod(
   const std::string & method,
   const sensor_msgs::msg::PointCloud2 & cloud,
@@ -574,6 +918,162 @@ bool DeskewNode::deskewWithMethod(
   const DeskewTiming & timing,
   const Eigen::Isometry3d & t_base_lidar,
   sensor_msgs::msg::PointCloud2 & output,
+  std::string & reason,
+  FailureKind & failure_kind)
+{
+  const std::size_t point_count =
+    static_cast<std::size_t>(cloud.width) * static_cast<std::size_t>(cloud.height);
+  if (point_offsets.size() != point_count) {
+    reason = "point offset count does not match PointCloud2 point count";
+    failure_kind = FailureKind::Generic;
+    return false;
+  }
+
+  std::vector<DeskewPoint> points;
+  points.reserve(point_count);
+  for (std::uint32_t row = 0; row < cloud.height; ++row) {
+    for (std::uint32_t col = 0; col < cloud.width; ++col) {
+      const std::size_t index =
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(cloud.width) +
+        static_cast<std::size_t>(col);
+      const std::uint8_t * input_point =
+        cloud.data.data() + static_cast<std::size_t>(row) * cloud.row_step +
+        static_cast<std::size_t>(col) * cloud.point_step;
+
+      double x = 0.0;
+      double y = 0.0;
+      double z = 0.0;
+      if (!field_helper.readXYZ(input_point, x, y, z)) {
+        reason = "failed to read x/y/z fields";
+        failure_kind = FailureKind::Generic;
+        return false;
+      }
+
+      DeskewPoint point;
+      point.x = static_cast<float>(x);
+      point.y = static_cast<float>(y);
+      point.z = static_cast<float>(z);
+      point.offset_time_sec = point_offsets[index];
+      point.valid = std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+      points.push_back(point);
+    }
+  }
+
+  std::vector<DeskewPoint> corrected_points;
+  DeskewStats stats;
+  if (!processDeskewPoints(
+      method,
+      points,
+      timing,
+      t_base_lidar,
+      corrected_points,
+      stats,
+      reason,
+      failure_kind))
+  {
+    return false;
+  }
+
+  output = cloud;
+  output.header.frame_id = lidar_frame_;
+  output.header.stamp = timeToMsg(timing.t_ref);
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (std::uint32_t row = 0; row < cloud.height; ++row) {
+    for (std::uint32_t col = 0; col < cloud.width; ++col) {
+      const std::size_t index =
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(cloud.width) +
+        static_cast<std::size_t>(col);
+      std::uint8_t * output_point =
+        output.data.data() + static_cast<std::size_t>(row) * output.row_step +
+        static_cast<std::size_t>(col) * output.point_step;
+
+      const auto & corrected = corrected_points[index];
+      if (!corrected.valid) {
+        output.is_dense = false;
+        if (corrected.output_nan) {
+          if (!field_helper.writeXYZ(output_point, nan, nan, nan)) {
+            reason = "x/y/z fields must be FLOAT32 or FLOAT64 for writing";
+            failure_kind = FailureKind::Generic;
+            return false;
+          }
+        }
+        continue;
+      }
+
+      if (!field_helper.writeXYZ(
+          output_point,
+          corrected.x,
+          corrected.y,
+          corrected.z))
+      {
+        reason = "x/y/z fields must be FLOAT32 or FLOAT64 for writing";
+        failure_kind = FailureKind::Generic;
+        return false;
+      }
+    }
+  }
+
+  if (enable_debug_log_) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Deskew method '%s' completed: valid=%zu nan_or_inf=%zu range_filtered=%zu",
+      method.c_str(),
+      stats.valid_points,
+      stats.nan_points,
+      stats.range_filtered_points);
+  }
+
+  return true;
+}
+
+bool DeskewNode::deskewCustomPointsWithMethod(
+  const std::string & method,
+  const std::vector<DeskewPoint> & points,
+  const DeskewTiming & timing,
+  const Eigen::Isometry3d & t_base_lidar,
+  sensor_msgs::msg::PointCloud2 & output,
+  std::string & reason,
+  FailureKind & failure_kind)
+{
+  std::vector<DeskewPoint> corrected_points;
+  DeskewStats stats;
+  if (!processDeskewPoints(
+      method,
+      points,
+      timing,
+      t_base_lidar,
+      corrected_points,
+      stats,
+      reason,
+      failure_kind))
+  {
+    return false;
+  }
+
+  output = buildCustomOutputCloud(corrected_points, timing.t_ref, lidar_frame_);
+
+  if (enable_debug_log_) {
+    RCLCPP_INFO(
+      get_logger(),
+      "CustomMsg deskew method '%s' completed: valid=%zu nan_or_inf=%zu range_filtered=%zu filter_mode=%s",
+      method.c_str(),
+      stats.valid_points,
+      stats.nan_points,
+      stats.range_filtered_points,
+      filter_mode_.c_str());
+  }
+
+  return true;
+}
+
+bool DeskewNode::processDeskewPoints(
+  const std::string & method,
+  const std::vector<DeskewPoint> & points,
+  const DeskewTiming & timing,
+  const Eigen::Isometry3d & t_base_lidar,
+  std::vector<DeskewPoint> & corrected_points,
+  DeskewStats & stats,
   std::string & reason,
   FailureKind & failure_kind)
 {
@@ -589,7 +1089,6 @@ bool DeskewNode::deskewWithMethod(
   const auto poses = needs_odom ? pose_buffer_.snapshot() : std::vector<Pose>{};
   const auto imu_samples = needs_imu ? imu_buffer_.snapshot() : std::vector<ImuSample>{};
 
-  // 时间偏移只在查询时应用，buffer 内保留消息原始 stamp，避免重复补偿。
   auto lookup_odom_pose =
     [&](const rclcpp::Time & stamp, Pose & pose, std::string & lookup_reason) -> bool {
       const rclcpp::Time query_time = stamp + secondsToDuration(odomTimeOffsetRuntime());
@@ -627,6 +1126,10 @@ bool DeskewNode::deskewWithMethod(
         failure_kind = FailureKind::NoImu;
         return false;
       }
+      if (imu_rotation_sign_ < 0.0) {
+        q_from_to = q_from_to.inverse();
+      }
+      q_from_to.normalize();
       return true;
     };
 
@@ -646,13 +1149,15 @@ bool DeskewNode::deskewWithMethod(
   } else if (method == "linear") {
     if (!lookup_odom_pose(timing.actual_scan_start, linear_start_pose, lookup_reason)) {
       logPoseBufferStatus("linear fallback scan_start pose lookup failed");
-      reason = "failed to interpolate odom pose at scan_start for linear fallback: " + lookup_reason;
+      reason = "failed to interpolate odom pose at scan_start for linear fallback: " +
+        lookup_reason;
       return false;
     }
 
     if (!lookup_odom_pose(timing.actual_scan_end, linear_end_pose, lookup_reason)) {
       logPoseBufferStatus("linear fallback scan_end pose lookup failed");
-      reason = "failed to interpolate odom pose at scan_end for linear fallback: " + lookup_reason;
+      reason = "failed to interpolate odom pose at scan_end for linear fallback: " +
+        lookup_reason;
       return false;
     }
 
@@ -669,6 +1174,7 @@ bool DeskewNode::deskewWithMethod(
       reason = "failed to integrate IMU rotation over full scan: " + imu_reason;
       return false;
     }
+    logImuRotationDebug("imu_only full_scan", timing.actual_scan_start, timing.actual_scan_end, q_scan_check);
 
     Eigen::Quaterniond q_start_ref = Eigen::Quaterniond::Identity();
     if (!integrate_imu(timing.actual_scan_start, timing.t_ref, q_start_ref, imu_reason)) {
@@ -692,166 +1198,230 @@ bool DeskewNode::deskewWithMethod(
       reason = "failed to integrate IMU rotation over full scan for odom_imu: " + imu_reason;
       return false;
     }
+    logImuRotationDebug("odom_imu full_scan", timing.actual_scan_start, timing.actual_scan_end, q_scan_check);
 
     t_source_lidar_ref = poseToIsometry(ref_pose) * t_base_lidar;
   }
 
   const Eigen::Isometry3d t_lidar_ref_source = t_source_lidar_ref.inverse();
-  output = cloud;
-  output.header.frame_id = lidar_frame_;
-  output.header.stamp = timeToMsg(timing.t_ref);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  bool logged_point_imu_rotation = false;
+  corrected_points.reserve(points.size());
 
-  const double nan = std::numeric_limits<double>::quiet_NaN();
-  std::size_t valid_points = 0;
-  std::size_t nan_points = 0;
-  std::size_t range_filtered_points = 0;
+  for (const auto & point : points) {
+    DeskewPoint corrected = point;
 
-  for (std::uint32_t row = 0; row < cloud.height; ++row) {
-    for (std::uint32_t col = 0; col < cloud.width; ++col) {
-      const std::size_t index =
-        static_cast<std::size_t>(row) * static_cast<std::size_t>(cloud.width) +
-        static_cast<std::size_t>(col);
-      const std::uint8_t * input_point =
-        cloud.data.data() + static_cast<std::size_t>(row) * cloud.row_step +
-        static_cast<std::size_t>(col) * cloud.point_step;
-      std::uint8_t * output_point =
-        output.data.data() + static_cast<std::size_t>(row) * output.row_step +
-        static_cast<std::size_t>(col) * output.point_step;
-
-      double x = 0.0;
-      double y = 0.0;
-      double z = 0.0;
-      if (!field_helper.readXYZ(input_point, x, y, z)) {
-        reason = "failed to read x/y/z fields";
-        failure_kind = FailureKind::Generic;
-        return false;
+    const bool finite_point =
+      point.valid && std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z);
+    if (!finite_point) {
+      ++stats.nan_points;
+      corrected.valid = false;
+      corrected.output_nan = remove_nan_;
+      if (corrected.output_nan) {
+        corrected.x = nan;
+        corrected.y = nan;
+        corrected.z = nan;
       }
-
-      const bool finite_point = std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
-      if (!finite_point) {
-        ++nan_points;
-        output.is_dense = false;
-        if (remove_nan_) {
-          if (!field_helper.writeXYZ(output_point, nan, nan, nan)) {
-            reason = "x/y/z fields must be FLOAT32 or FLOAT64 for writing";
-            failure_kind = FailureKind::Generic;
-            return false;
-          }
-        }
-        continue;
-      }
-
-      const double range = std::sqrt(x * x + y * y + z * z);
-      if (range < min_range_ || range > max_range_) {
-        ++range_filtered_points;
-        output.is_dense = false;
-        if (!field_helper.writeXYZ(output_point, nan, nan, nan)) {
-          reason = "x/y/z fields must be FLOAT32 or FLOAT64 for writing";
-          failure_kind = FailureKind::Generic;
-          return false;
-        }
-        continue;
-      }
-
-      const rclcpp::Time point_time =
-        timing.actual_scan_start + secondsToDuration(point_offsets[index]);
-      Eigen::Isometry3d t_source_lidar_i = Eigen::Isometry3d::Identity();
-
-      if (method == "odom") {
-        Pose point_pose;
-        if (!lookup_odom_pose(point_time, point_pose, lookup_reason)) {
-          logPoseBufferStatus("point pose lookup failed");
-          reason = "failed to interpolate odom pose at point time: " + lookup_reason;
-          return false;
-        }
-        t_source_lidar_i = poseToIsometry(point_pose) * t_base_lidar;
-      } else if (method == "linear") {
-        const double alpha = timing.scan_duration > 0.0 ?
-          clamp01((point_time - timing.actual_scan_start).seconds() / timing.scan_duration) :
-          0.0;
-        const Pose point_pose =
-          interpolatePose(linear_start_pose, linear_end_pose, alpha, point_time);
-        t_source_lidar_i = poseToIsometry(point_pose) * t_base_lidar;
-      } else if (method == "imu_only") {
-        Eigen::Quaterniond q_ref_point = Eigen::Quaterniond::Identity();
-        std::string imu_reason;
-        // q_ref_point 表示从参考时刻 lidar 坐标到当前点时刻 lidar 坐标的相对旋转。
-        if (!integrate_imu(timing.t_ref, point_time, q_ref_point, imu_reason)) {
-          logImuBufferStatus("imu_only point rotation integration failed");
-          reason = "failed to integrate IMU rotation at point time: " + imu_reason;
-          return false;
-        }
-        t_source_lidar_i = rotationOnlyPose(q_ref_point);
-      } else if (method == "odom_imu") {
-        Pose point_pose;
-        if (!lookup_odom_pose(point_time, point_pose, lookup_reason)) {
-          logPoseBufferStatus("odom_imu point pose lookup failed");
-          reason = "failed to interpolate odom position at point time for odom_imu: " +
-            lookup_reason;
-          return false;
-        }
-
-        Eigen::Quaterniond q_ref_point = Eigen::Quaterniond::Identity();
-        std::string imu_reason;
-        if (!integrate_imu(timing.t_ref, point_time, q_ref_point, imu_reason)) {
-          logImuBufferStatus("odom_imu point rotation integration failed");
-          reason = "failed to integrate IMU relative rotation at point time: " + imu_reason;
-          return false;
-        }
-
-        const Eigen::Isometry3d t_odom_lidar_ref = poseToIsometry(ref_pose) * t_base_lidar;
-        const Eigen::Isometry3d t_odom_lidar_i = poseToIsometry(point_pose) * t_base_lidar;
-        const Eigen::Isometry3d t_rel_odom = t_odom_lidar_ref.inverse() * t_odom_lidar_i;
-
-        // odom_imu 策略 A：相对平移取 odom，相对旋转优先取 IMU 高频积分。
-        t_source_lidar_i = Eigen::Isometry3d::Identity();
-        t_source_lidar_i.translation() = t_rel_odom.translation();
-        if (rotation_source_ == "odom") {
-          t_source_lidar_i.linear() = t_rel_odom.linear();
-        } else if (rotation_source_ == "fused") {
-          Eigen::Quaterniond q_odom(t_rel_odom.linear());
-          q_odom.normalize();
-          t_source_lidar_i.linear() = q_odom.slerp(0.5, q_ref_point.normalized()).toRotationMatrix();
-        } else {
-          t_source_lidar_i.linear() = q_ref_point.normalized().toRotationMatrix();
-        }
-      }
-
-      const Eigen::Vector3d raw_point(x, y, z);
-      Eigen::Vector3d corrected_point = Eigen::Vector3d::Zero();
-      // odom/linear 使用全局位姿链 T_ref^-1*T_i；imu_only/odom_imu 已直接构造 lidar_ref 下的相对变换。
-      if (method == "imu_only" || method == "odom_imu") {
-        corrected_point = t_source_lidar_i * raw_point;
-      } else {
-        corrected_point = t_lidar_ref_source * t_source_lidar_i * raw_point;
-      }
-
-      if (!field_helper.writeXYZ(
-          output_point,
-          corrected_point.x(),
-          corrected_point.y(),
-          corrected_point.z()))
-      {
-        reason = "x/y/z fields must be FLOAT32 or FLOAT64 for writing";
-        failure_kind = FailureKind::Generic;
-        return false;
-      }
-
-      ++valid_points;
+      corrected_points.push_back(corrected);
+      continue;
     }
-  }
 
-  if (enable_debug_log_) {
-    RCLCPP_INFO(
-      get_logger(),
-      "Deskew method '%s' completed: valid=%zu nan_or_inf=%zu range_filtered=%zu",
-      method.c_str(),
-      valid_points,
-      nan_points,
-      range_filtered_points);
+    const double x = static_cast<double>(point.x);
+    const double y = static_cast<double>(point.y);
+    const double z = static_cast<double>(point.z);
+    const double range = std::sqrt(x * x + y * y + z * z);
+    if (range < min_range_ || range > max_range_) {
+      ++stats.range_filtered_points;
+      corrected.x = nan;
+      corrected.y = nan;
+      corrected.z = nan;
+      corrected.valid = false;
+      corrected.output_nan = true;
+      corrected_points.push_back(corrected);
+      continue;
+    }
+
+    const rclcpp::Time point_time =
+      timing.actual_scan_start + secondsToDuration(point.offset_time_sec);
+    Eigen::Isometry3d t_source_lidar_i = Eigen::Isometry3d::Identity();
+
+    if (method == "odom") {
+      Pose point_pose;
+      if (!lookup_odom_pose(point_time, point_pose, lookup_reason)) {
+        logPoseBufferStatus("point pose lookup failed");
+        reason = "failed to interpolate odom pose at point time: " + lookup_reason;
+        return false;
+      }
+      t_source_lidar_i = poseToIsometry(point_pose) * t_base_lidar;
+    } else if (method == "linear") {
+      const double alpha = timing.scan_duration > 0.0 ?
+        clamp01((point_time - timing.actual_scan_start).seconds() / timing.scan_duration) :
+        0.0;
+      const Pose point_pose =
+        interpolatePose(linear_start_pose, linear_end_pose, alpha, point_time);
+      t_source_lidar_i = poseToIsometry(point_pose) * t_base_lidar;
+    } else if (method == "imu_only") {
+      Eigen::Quaterniond q_ref_point = Eigen::Quaterniond::Identity();
+      std::string imu_reason;
+      if (!integrate_imu(timing.t_ref, point_time, q_ref_point, imu_reason)) {
+        logImuBufferStatus("imu_only point rotation integration failed");
+        reason = "failed to integrate IMU rotation at point time: " + imu_reason;
+        return false;
+      }
+      if (!logged_point_imu_rotation) {
+        logImuRotationDebug("imu_only sample_point", timing.t_ref, point_time, q_ref_point);
+        logged_point_imu_rotation = true;
+      }
+      t_source_lidar_i = rotationOnlyPose(q_ref_point);
+    } else if (method == "odom_imu") {
+      Pose point_pose;
+      if (!lookup_odom_pose(point_time, point_pose, lookup_reason)) {
+        logPoseBufferStatus("odom_imu point pose lookup failed");
+        reason = "failed to interpolate odom position at point time for odom_imu: " +
+          lookup_reason;
+        return false;
+      }
+
+      Eigen::Quaterniond q_ref_point = Eigen::Quaterniond::Identity();
+      std::string imu_reason;
+      if (!integrate_imu(timing.t_ref, point_time, q_ref_point, imu_reason)) {
+        logImuBufferStatus("odom_imu point rotation integration failed");
+        reason = "failed to integrate IMU relative rotation at point time: " + imu_reason;
+        return false;
+      }
+      if (!logged_point_imu_rotation) {
+        logImuRotationDebug("odom_imu sample_point", timing.t_ref, point_time, q_ref_point);
+        logged_point_imu_rotation = true;
+      }
+
+      const Eigen::Isometry3d t_odom_lidar_ref = poseToIsometry(ref_pose) * t_base_lidar;
+      const Eigen::Isometry3d t_odom_lidar_i = poseToIsometry(point_pose) * t_base_lidar;
+      const Eigen::Isometry3d t_rel_odom = t_odom_lidar_ref.inverse() * t_odom_lidar_i;
+
+      t_source_lidar_i = Eigen::Isometry3d::Identity();
+      t_source_lidar_i.translation() = t_rel_odom.translation();
+      if (rotation_source_ == "odom") {
+        t_source_lidar_i.linear() = t_rel_odom.linear();
+      } else if (rotation_source_ == "fused") {
+        Eigen::Quaterniond q_odom(t_rel_odom.linear());
+        q_odom.normalize();
+        t_source_lidar_i.linear() = q_odom.slerp(0.5, q_ref_point.normalized()).toRotationMatrix();
+      } else {
+        t_source_lidar_i.linear() = q_ref_point.normalized().toRotationMatrix();
+      }
+    }
+
+    const Eigen::Vector3d raw_point(x, y, z);
+    Eigen::Vector3d corrected_vector = Eigen::Vector3d::Zero();
+    if (method == "imu_only" || method == "odom_imu") {
+      corrected_vector = t_source_lidar_i * raw_point;
+    } else {
+      corrected_vector = t_lidar_ref_source * t_source_lidar_i * raw_point;
+    }
+
+    if (!std::isfinite(corrected_vector.x()) ||
+        !std::isfinite(corrected_vector.y()) ||
+        !std::isfinite(corrected_vector.z()))
+    {
+      ++stats.nan_points;
+      corrected.x = nan;
+      corrected.y = nan;
+      corrected.z = nan;
+      corrected.valid = false;
+      corrected.output_nan = true;
+      corrected_points.push_back(corrected);
+      continue;
+    }
+
+    corrected.x = static_cast<float>(corrected_vector.x());
+    corrected.y = static_cast<float>(corrected_vector.y());
+    corrected.z = static_cast<float>(corrected_vector.z());
+    corrected.valid = true;
+    corrected.output_nan = false;
+    corrected_points.push_back(corrected);
+    ++stats.valid_points;
   }
 
   return true;
+}
+
+sensor_msgs::msg::PointCloud2 DeskewNode::buildCustomOutputCloud(
+  const std::vector<DeskewPoint> & points,
+  const rclcpp::Time & stamp,
+  const std::string & frame_id) const
+{
+  sensor_msgs::msg::PointCloud2 cloud;
+  cloud.header.frame_id = frame_id;
+  cloud.header.stamp = timeToMsg(stamp);
+  cloud.height = 1U;
+  cloud.is_bigendian = false;
+  cloud.is_dense = false;
+
+  const bool compact = filter_mode_ == "compact";
+  const std::uint32_t point_step = 24U;
+  cloud.fields.resize(7U);
+  cloud.fields[0].name = "x";
+  cloud.fields[0].offset = 0U;
+  cloud.fields[0].datatype = sensor_msgs::msg::PointField::FLOAT32;
+  cloud.fields[0].count = 1U;
+  cloud.fields[1].name = "y";
+  cloud.fields[1].offset = 4U;
+  cloud.fields[1].datatype = sensor_msgs::msg::PointField::FLOAT32;
+  cloud.fields[1].count = 1U;
+  cloud.fields[2].name = "z";
+  cloud.fields[2].offset = 8U;
+  cloud.fields[2].datatype = sensor_msgs::msg::PointField::FLOAT32;
+  cloud.fields[2].count = 1U;
+  cloud.fields[3].name = "intensity";
+  cloud.fields[3].offset = 12U;
+  cloud.fields[3].datatype = sensor_msgs::msg::PointField::FLOAT32;
+  cloud.fields[3].count = 1U;
+  cloud.fields[4].name = "offset_time";
+  cloud.fields[4].offset = 16U;
+  cloud.fields[4].datatype = sensor_msgs::msg::PointField::UINT32;
+  cloud.fields[4].count = 1U;
+  cloud.fields[5].name = "tag";
+  cloud.fields[5].offset = 20U;
+  cloud.fields[5].datatype = sensor_msgs::msg::PointField::UINT8;
+  cloud.fields[5].count = 1U;
+  cloud.fields[6].name = "line";
+  cloud.fields[6].offset = 21U;
+  cloud.fields[6].datatype = sensor_msgs::msg::PointField::UINT8;
+  cloud.fields[6].count = 1U;
+  cloud.point_step = point_step;
+
+  std::uint32_t output_count = 0U;
+  if (compact) {
+    output_count = static_cast<std::uint32_t>(
+      std::count_if(points.begin(), points.end(), [](const DeskewPoint & point) {
+        return point.valid;
+      }));
+  } else {
+    output_count = static_cast<std::uint32_t>(points.size());
+  }
+
+  cloud.width = output_count;
+  cloud.row_step = cloud.point_step * cloud.width;
+  cloud.data.resize(static_cast<std::size_t>(cloud.row_step) * cloud.height, 0U);
+
+  std::size_t output_index = 0U;
+  for (const auto & point : points) {
+    if (compact && !point.valid) {
+      continue;
+    }
+
+    const std::size_t base = output_index * cloud.point_step;
+    writePointField(cloud.data, base + 0U, point.x);
+    writePointField(cloud.data, base + 4U, point.y);
+    writePointField(cloud.data, base + 8U, point.z);
+    writePointField(cloud.data, base + 12U, point.intensity);
+    writePointField(cloud.data, base + 16U, point.offset_time_raw);
+    writePointField(cloud.data, base + 20U, point.tag);
+    writePointField(cloud.data, base + 21U, point.line);
+    ++output_index;
+  }
+
+  return cloud;
 }
 
 bool DeskewNode::lookupBaseToLidar(Eigen::Isometry3d & t_base_lidar, std::string & reason)
@@ -896,10 +1466,42 @@ void DeskewNode::handleDeskewFailure(
   RCLCPP_WARN(get_logger(), "No safe fallback enabled; dropping failed cloud.");
 }
 
+void DeskewNode::handleCustomDeskewFailure(
+  const std_msgs::msg::Header & header,
+  const std::vector<DeskewPoint> & points,
+  const rclcpp::Time & output_stamp,
+  const std::string & reason,
+  FailureKind kind)
+{
+  (void)header;
+  RCLCPP_WARN(get_logger(), "CustomMsg deskew failed/dropped: %s", reason.c_str());
+
+  if (kind == FailureKind::NoPose && drop_if_no_pose_) {
+    return;
+  }
+
+  if (kind == FailureKind::NoImu && drop_if_no_imu_) {
+    return;
+  }
+
+  if (publish_raw_when_failed_) {
+    auto raw = buildCustomOutputCloud(points, output_stamp, lidar_frame_);
+    RCLCPP_WARN(get_logger(), "Publishing raw CustomMsg-converted cloud on output topic due to failure.");
+    cloud_pub_->publish(raw);
+    return;
+  }
+
+  RCLCPP_WARN(get_logger(), "No safe fallback enabled; dropping failed CustomMsg cloud.");
+}
+
 void DeskewNode::recordCloudDelay(const sensor_msgs::msg::PointCloud2 & cloud)
 {
+  recordCloudDelay(rclcpp::Time(cloud.header.stamp));
+}
+
+void DeskewNode::recordCloudDelay(const rclcpp::Time & stamp)
+{
   const rclcpp::Time now = this->now();
-  const rclcpp::Time stamp(cloud.header.stamp);
   const double delay = (now - stamp).seconds();
   if (delay < 0.0) {
     RCLCPP_WARN_THROTTLE(
@@ -1118,6 +1720,66 @@ void DeskewNode::logCloudTiming(
     max_point_offset);
 }
 
+void DeskewNode::logCustomMsgTiming(
+  const livox_ros_driver2::msg::CustomMsg & cloud,
+  const rclcpp::Time & cloud_stamp,
+  const rclcpp::Time & actual_scan_start,
+  const rclcpp::Time & actual_scan_end,
+  double scan_duration,
+  std::uint32_t min_point_offset,
+  std::uint32_t max_point_offset) const
+{
+  RCLCPP_INFO(
+    get_logger(),
+    "CustomMsg timing: header_stamp=%s cloud_stamp=%s timebase=%llu timebase_type=%s offset_unit=%s actual_scan_start=%s actual_scan_end=%s scan_duration=%.9f min_offset_time=%u max_offset_time=%u point_num=%u points_size=%zu",
+    stampToString(rclcpp::Time(cloud.header.stamp)).c_str(),
+    stampToString(cloud_stamp).c_str(),
+    static_cast<unsigned long long>(cloud.timebase),
+    custom_msg_timebase_type_.c_str(),
+    custom_msg_offset_unit_.c_str(),
+    stampToString(actual_scan_start).c_str(),
+    stampToString(actual_scan_end).c_str(),
+    scan_duration,
+    min_point_offset,
+    max_point_offset,
+    cloud.point_num,
+    cloud.points.size());
+}
+
+void DeskewNode::logImuRotationDebug(
+  const std::string & context,
+  const rclcpp::Time & from,
+  const rclcpp::Time & to,
+  const Eigen::Quaterniond & q_from_to)
+{
+  if (!enable_debug_log_) {
+    return;
+  }
+
+  const Eigen::Quaterniond q = q_from_to.normalized();
+  const double yaw_delta = std::atan2(
+    2.0 * (q.w() * q.z() + q.x() * q.y()),
+    1.0 - 2.0 * (q.y() * q.y() + q.z() * q.z()));
+  RCLCPP_INFO_THROTTLE(
+    get_logger(),
+    *get_clock(),
+    1000,
+    "imu_rotation_debug context=%s from=%s to=%s dt=%.9f q=[%.9f, %.9f, %.9f, %.9f] yaw_delta=%.9f rad imu_rotation_sign=%.1f gyro_bias=[%.9f, %.9f, %.9f]",
+    context.c_str(),
+    stampToString(from).c_str(),
+    stampToString(to).c_str(),
+    (to - from).seconds(),
+    q.w(),
+    q.x(),
+    q.y(),
+    q.z(),
+    yaw_delta,
+    imu_rotation_sign_,
+    gyro_bias_.x(),
+    gyro_bias_.y(),
+    gyro_bias_.z());
+}
+
 void DeskewNode::logPoseBufferStatus(const std::string & context) const
 {
   const auto status = pose_buffer_.status();
@@ -1155,6 +1817,11 @@ std::string DeskewNode::stampToString(const rclcpp::Time & stamp)
   return oss.str();
 }
 
+bool DeskewNode::isSupportedCloudInputType(const std::string & value)
+{
+  return value == "pointcloud2" || value == "custom_msg";
+}
+
 bool DeskewNode::isSupportedScanStampType(const std::string & value)
 {
   return value == "scan_start" || value == "scan_end";
@@ -1178,6 +1845,33 @@ bool DeskewNode::isSupportedFallbackMethod(const std::string & value)
 bool DeskewNode::isSupportedRotationSource(const std::string & value)
 {
   return value == "imu" || value == "odom" || value == "fused";
+}
+
+bool DeskewNode::isSupportedCustomMsgTimebaseType(const std::string & value)
+{
+  return value == "ros_header" || value == "custom_timebase";
+}
+
+bool DeskewNode::customMsgOffsetUnitScale(const std::string & value, double & scale)
+{
+  if (value == "second") {
+    scale = 1.0;
+    return true;
+  }
+  if (value == "millisecond") {
+    scale = 1.0e-3;
+    return true;
+  }
+  if (value == "microsecond") {
+    scale = 1.0e-6;
+    return true;
+  }
+  if (value == "nanosecond") {
+    scale = 1.0e-9;
+    return true;
+  }
+  scale = 0.0;
+  return false;
 }
 
 double DeskewNode::odomTimeOffsetRuntime() const

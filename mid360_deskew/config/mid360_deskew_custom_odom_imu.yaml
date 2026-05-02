@@ -1,0 +1,67 @@
+# Livox CustomMsg 输入：Odin1 odom 平移 + MID360 IMU 高频旋转
+mid360_deskew_node:
+  ros__parameters:
+    use_sim_time: false
+
+    cloud_input_type: "custom_msg"
+    custom_cloud_topic: "/livox/lidar"
+    input_cloud_topic: "/mid360/points"
+    output_cloud_topic: "/mid360/points_deskewed"
+
+    odom_topic: "/odom"
+    imu_topic: "/mid360/imu"
+
+    fixed_frame: "odom"
+    base_frame: "base_link"
+    lidar_frame: "mid360_link"
+    imu_frame: "mid360_imu_link"
+    custom_msg_frame_id: "mid360_link"
+
+    deskew_method: "odom_imu"
+    fallback_method: "odom"
+    deskew_target_time: "scan_end"
+
+    rotation_source: "imu"
+    translation_source: "odom"
+
+    custom_msg_timebase_type: "ros_header"
+    custom_msg_offset_unit: "nanosecond"
+    point_time_field: "offset_time"
+    point_time_unit: "nanosecond"
+    cloud_stamp_type: "scan_start"
+
+    cloud_time_offset: 0.0
+    odom_time_offset: 0.0
+    imu_time_offset: 0.0
+
+    pose_buffer_duration: 5.0
+    imu_buffer_duration: 5.0
+    max_allowed_time_gap: 0.05
+    max_allowed_imu_gap: 0.02
+    allow_extrapolation: false
+
+    estimate_gyro_bias: true
+    gyro_bias_estimation_duration: 2.0
+    gyro_bias_static_threshold: 0.05
+    use_acc_for_translation: false
+    imu_rotation_sign: 1.0  # IMU 旋转方向验证参数；正常为 1.0，若 imu_only 比 raw 更差可临时试 -1.0
+
+    min_range: 0.05
+    max_range: 5.0
+    remove_nan: true
+    filter_mode: "keep_size_nan"
+
+    drop_if_no_point_time: true
+    drop_if_no_pose: true
+    drop_if_no_imu: false
+    publish_raw_when_failed: false
+
+    enable_time_check: true
+    time_check_window: 3.0
+    time_check_min_samples: 20
+    apply_auto_time_offset: false
+    auto_time_offset_max_abs: 0.1
+    delay_jitter_warning_threshold: 0.01
+    print_time_check_result: true
+
+    enable_debug_log: true

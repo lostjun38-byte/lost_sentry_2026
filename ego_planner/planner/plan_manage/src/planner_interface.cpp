@@ -82,7 +82,7 @@ namespace ego_planner
         std::cout << "origin =" << origin << std::endl;
         std::cout << "inflate_values =" << inflate_values << std::endl;
         //初始化gridmap地图
-        Eigen::Vector2i map_size(x_size,y_size);     
+        Eigen::Vector2i map_size(x_size,y_size);
         grid_map_     = std::make_shared<GridMap2D>(resolution,map_size);
         grid_map_->setInflateRadius(inflate_values);
 
@@ -90,8 +90,41 @@ namespace ego_planner
         bspline_optimizer_rebound_->setParam();
         bspline_optimizer_rebound_->setEnvironment(grid_map_);
         bspline_optimizer_rebound_->a_star_.reset(new AStar);
-        bspline_optimizer_rebound_->a_star_->initGridMap(grid_map_, Eigen::Vector2i(100, 100));
-       
+        // Initial pool: large enough to cover a typical local/global costmap
+        // (~30 m x 18 m at 0.05 m resolution => 600 x 360). The pool is
+        // re-built on demand by ensureAStarPoolCovers() if a larger map
+        // arrives at runtime.
+        a_star_pool_size_ = Eigen::Vector2i(600, 400);
+        bspline_optimizer_rebound_->a_star_->initGridMap(grid_map_, a_star_pool_size_);
+
+    }
+
+    void PlannerInterface::ensureAStarPoolCovers(const Eigen::Vector2i & required)
+    {
+        // A 50-cell margin keeps a tiny costmap resize from triggering a
+        // rebuild every frame.
+        constexpr int kMargin = 50;
+        const int needed_x = required.x() + kMargin;
+        const int needed_y = required.y() + kMargin;
+
+        if (a_star_pool_size_.x() >= needed_x && a_star_pool_size_.y() >= needed_y) {
+            return;
+        }
+
+        // Grow geometrically so we don't churn allocations when the costmap
+        // expands a few cells at a time.
+        const int new_x = std::max(needed_x, a_star_pool_size_.x() * 2);
+        const int new_y = std::max(needed_y, a_star_pool_size_.y() * 2);
+
+        std::cerr << "[PlannerInterface] Resizing A* pool from ("
+                  << a_star_pool_size_.x() << ", " << a_star_pool_size_.y()
+                  << ") to (" << new_x << ", " << new_y
+                  << ") to cover OccupancyGrid (" << required.x() << ", "
+                  << required.y() << ")." << std::endl;
+
+        bspline_optimizer_rebound_->a_star_.reset(new AStar);
+        a_star_pool_size_ = Eigen::Vector2i(new_x, new_y);
+        bspline_optimizer_rebound_->a_star_->initGridMap(grid_map_, a_star_pool_size_);
     }
 
     void PlannerInterface::setOccupancyGridMap(const nav_msgs::msg::OccupancyGrid& costmap, double inflate_values)
@@ -123,6 +156,7 @@ namespace ego_planner
 
         map_is_preinflated_ = false;
         grid_map_->inflate();
+        ensureAStarPoolCovers(map_size);
     }
 
     void PlannerInterface::setNav2InflatedOccupancyGridMap(const nav_msgs::msg::OccupancyGrid& costmap)
@@ -152,6 +186,7 @@ namespace ego_planner
         }
 
         map_is_preinflated_ = true;
+        ensureAStarPoolCovers(map_size);
     }
 
     void PlannerInterface::setPathPoint(std::vector<PathPoint> &plan_traj)
@@ -226,78 +261,93 @@ namespace ego_planner
 
     void PlannerInterface::makePlan()
     {
-        if (kVerbosePlannerLog) {
-            std::cout << "开始规划..." << std::endl;
-        }
-        _plan_traj_results_.clear();
-        if (_global_plan_traj_.size() < 4) {
-            std::cerr << "[PlannerInterface::makePlan] 全局参考路径点数不足，跳过 Ego B-spline 规划: points="
-                      << _global_plan_traj_.size() << "，B-spline 至少需要 4 个点。" << std::endl;
-            return;
-        }
-
-        Eigen::Vector3d start_pt;
-        Eigen::Vector3d start_vel;
-        Eigen::Vector3d start_acc;
-        Eigen::Vector3d local_target_pt;
-        Eigen::Vector3d local_target_vel;
-        Eigen::Vector3d local_target_acc;
-        vector<Eigen::Vector3d> point_set;
-
-
-        vector<Eigen::Vector3d> traj_pts;
-
-        for(int i = 0; i< _global_plan_traj_.size();i++)
-        {
-            Eigen::Vector3d plan_pt(_global_plan_traj_[i].x,_global_plan_traj_[i].y,0.2);
-            point_set.push_back(plan_pt);
-        }
-
-        start_pt[0] = _global_plan_traj_[0].x;
-        start_pt[1] = _global_plan_traj_[0].y;
-        start_pt[2] = 0.0;
-        
-        local_target_pt[0] = _global_plan_traj_[_global_plan_traj_.size()-1].x;
-        local_target_pt[1] = _global_plan_traj_[_global_plan_traj_.size()-1].y;
-        local_target_pt[2] = 0;
-
-        const Eigen::Vector3d start_direction = estimatePathTangent(point_set);
-        double first_segment_length = 0.0;
-        for (size_t i = 1; i < point_set.size(); ++i) {
-            first_segment_length = (point_set[i] - point_set.front()).head<2>().norm();
-            if (first_segment_length > 1e-3) {
-                break;
+        // Defensive outer catch: any unhandled std::exception (Eigen size
+        // mismatch, std::out_of_range from cps_, A* internals, …) used to
+        // terminate the whole motion_plan node silently. Catch here so the
+        // node stays alive and the caller can see the planning failure.
+        try {
+            if (kVerbosePlannerLog) {
+                std::cout << "开始规划..." << std::endl;
             }
-        }
-        const double nominal_knot_interval =
-            pp_.ctrl_pt_dist / std::max(pp_.max_vel_, 1e-3) * 1.2;
-        double start_speed = first_segment_length / std::max(nominal_knot_interval, 1e-3);
-        start_speed = std::min(start_speed, std::min(1.2, pp_.max_vel_));
-        if (start_speed < 0.05 && (start_pt - local_target_pt).head<2>().norm() > 0.2) {
-            start_speed = std::min(0.2, pp_.max_vel_);
-        }
-        start_vel = start_direction * start_speed;
+            _plan_traj_results_.clear();
+            if (_global_plan_traj_.size() < 4) {
+                std::cerr << "[PlannerInterface::makePlan] 全局参考路径点数不足，跳过 Ego B-spline 规划: points="
+                          << _global_plan_traj_.size() << "，B-spline 至少需要 4 个点。" << std::endl;
+                return;
+            }
 
-        local_target_vel[0] = 0;//根据实际需求修改接入
-        local_target_vel[1] = 0;
-        local_target_vel[2] = 0;
-
-        start_acc.setZero();
-        local_target_acc.setZero();
+            Eigen::Vector3d start_pt;
+            Eigen::Vector3d start_vel;
+            Eigen::Vector3d start_acc;
+            Eigen::Vector3d local_target_pt;
+            Eigen::Vector3d local_target_vel;
+            Eigen::Vector3d local_target_acc;
+            vector<Eigen::Vector3d> point_set;
 
 
-        auto start = std::chrono::system_clock::now();
+            vector<Eigen::Vector3d> traj_pts;
 
-        bool plan_success = reboundReplan(
-            start_pt, start_vel, start_acc, local_target_pt, local_target_vel, local_target_acc, point_set);
-        if (plan_success)
-           getTraj();
-           
-        auto end = std::chrono::system_clock::now();
+            for(int i = 0; i< _global_plan_traj_.size();i++)
+            {
+                Eigen::Vector3d plan_pt(_global_plan_traj_[i].x,_global_plan_traj_[i].y,0.2);
+                point_set.push_back(plan_pt);
+            }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        if (kVerbosePlannerLog) {
-            printf("MotionPlanner Total Running Time: %ld  ms \n", elapsed.count());
+            start_pt[0] = _global_plan_traj_[0].x;
+            start_pt[1] = _global_plan_traj_[0].y;
+            start_pt[2] = 0.0;
+
+            local_target_pt[0] = _global_plan_traj_[_global_plan_traj_.size()-1].x;
+            local_target_pt[1] = _global_plan_traj_[_global_plan_traj_.size()-1].y;
+            local_target_pt[2] = 0;
+
+            const Eigen::Vector3d start_direction = estimatePathTangent(point_set);
+            double first_segment_length = 0.0;
+            for (size_t i = 1; i < point_set.size(); ++i) {
+                first_segment_length = (point_set[i] - point_set.front()).head<2>().norm();
+                if (first_segment_length > 1e-3) {
+                    break;
+                }
+            }
+            const double nominal_knot_interval =
+                pp_.ctrl_pt_dist / std::max(pp_.max_vel_, 1e-3) * 1.2;
+            double start_speed = first_segment_length / std::max(nominal_knot_interval, 1e-3);
+            start_speed = std::min(start_speed, std::min(1.2, pp_.max_vel_));
+            if (start_speed < 0.05 && (start_pt - local_target_pt).head<2>().norm() > 0.2) {
+                start_speed = std::min(0.2, pp_.max_vel_);
+            }
+            start_vel = start_direction * start_speed;
+
+            local_target_vel[0] = 0;//根据实际需求修改接入
+            local_target_vel[1] = 0;
+            local_target_vel[2] = 0;
+
+            start_acc.setZero();
+            local_target_acc.setZero();
+
+
+            auto start = std::chrono::system_clock::now();
+
+            bool plan_success = reboundReplan(
+                start_pt, start_vel, start_acc, local_target_pt, local_target_vel, local_target_acc, point_set);
+            if (plan_success)
+               getTraj();
+
+            auto end = std::chrono::system_clock::now();
+
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+            if (kVerbosePlannerLog) {
+                printf("MotionPlanner Total Running Time: %ld  ms \n", elapsed.count());
+            }
+        } catch (const std::exception & e) {
+            std::cerr << "[PlannerInterface::makePlan] caught std::exception: "
+                      << e.what() << std::endl;
+            _plan_traj_results_.clear();
+            a_star_pathes_.clear();
+        } catch (...) {
+            std::cerr << "[PlannerInterface::makePlan] caught unknown exception" << std::endl;
+            _plan_traj_results_.clear();
+            a_star_pathes_.clear();
         }
     }
 

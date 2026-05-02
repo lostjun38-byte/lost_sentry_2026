@@ -10,6 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_eigen REQUIRED)
@@ -29,11 +30,14 @@ target_include_directories(mid360_deskew_node
     $<INSTALL_INTERFACE:include>
 )
 
+target_compile_features(mid360_deskew_node PUBLIC cxx_std_17)
+
 ament_target_dependencies(mid360_deskew_node
   rclcpp
   sensor_msgs
   nav_msgs
   geometry_msgs
+  livox_ros_driver2
   tf2
   tf2_ros
   tf2_eigen

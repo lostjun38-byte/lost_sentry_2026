@@ -1,0 +1,67 @@
+# Livox CustomMsg 输入：只使用 Odin1 /odom 做 MID360 逐点去畸变
+mid360_deskew_node:
+  ros__parameters:
+    use_sim_time: false
+
+    cloud_input_type: "custom_msg"  # pointcloud2 / custom_msg；CustomMsg 直接使用每点 offset_time
+    custom_cloud_topic: "/livox/lidar"  # livox_ros_driver2/msg/CustomMsg 输入话题
+    input_cloud_topic: "/mid360/points"  # 仅 cloud_input_type=pointcloud2 时使用
+    output_cloud_topic: "/mid360/points_deskewed"
+
+    odom_topic: "/odom"
+    imu_topic: "/mid360/imu"
+
+    fixed_frame: "odom"
+    base_frame: "base_link"
+    lidar_frame: "mid360_link"
+    imu_frame: "mid360_imu_link"
+    custom_msg_frame_id: "mid360_link"  # CustomMsg header.frame_id 为空时用于诊断；输出仍使用 lidar_frame
+
+    deskew_method: "odom"
+    fallback_method: "none"
+    deskew_target_time: "scan_end"
+
+    rotation_source: "odom"
+    translation_source: "odom"
+
+    custom_msg_timebase_type: "ros_header"  # ros_header / custom_timebase
+    custom_msg_offset_unit: "nanosecond"  # second / millisecond / microsecond / nanosecond
+    point_time_field: "offset_time"  # 仅 PointCloud2 输入使用
+    point_time_unit: "nanosecond"  # 仅 PointCloud2 输入使用
+    cloud_stamp_type: "scan_start"
+
+    cloud_time_offset: 0.0
+    odom_time_offset: 0.0
+    imu_time_offset: 0.0
+
+    pose_buffer_duration: 5.0
+    imu_buffer_duration: 5.0
+    max_allowed_time_gap: 0.05
+    max_allowed_imu_gap: 0.02
+    allow_extrapolation: false
+
+    estimate_gyro_bias: false
+    gyro_bias_estimation_duration: 2.0
+    gyro_bias_static_threshold: 0.05
+    use_acc_for_translation: false
+    imu_rotation_sign: 1.0  # IMU 旋转方向验证参数；正常为 1.0，若 imu_only 比 raw 更差可临时试 -1.0
+
+    min_range: 0.05
+    max_range: 5.0
+    remove_nan: true
+    filter_mode: "keep_size_nan"  # keep_size_nan / compact；compact 只压缩 CustomMsg 输出
+
+    drop_if_no_point_time: true
+    drop_if_no_pose: true
+    drop_if_no_imu: false
+    publish_raw_when_failed: false
+
+    enable_time_check: true
+    time_check_window: 3.0
+    time_check_min_samples: 20
+    apply_auto_time_offset: false
+    auto_time_offset_max_abs: 0.1
+    delay_jitter_warning_threshold: 0.01
+    print_time_check_result: true
+
+    enable_debug_log: true

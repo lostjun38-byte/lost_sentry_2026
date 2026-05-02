@@ -21,7 +21,7 @@ This document records the source-level comparison used to regenerate `mid360_des
 | `MOLA lidar odometry` | Motion-compensation method layering and fallback strategy | Full LO/LIO pipeline, ICP, MRPT/MOLA runtime, odometry outputs | Adopted `deskew_method` and `fallback_method` parameter design |
 | `FAST_LIO / FAST_LIO2` | IMU buffer, LiDAR-IMU time coverage, gyro bias concept, extrinsic use, backward point compensation to scan end | iEKF, ikd-tree map, scan-to-map matching, online extrinsic estimation, odom/map publication, acceleration-based propagation | Adopted IMU buffer coverage, static gyro bias initialization, and explicit LiDAR-IMU frame rotation via TF |
 | `LIO-Livox` | Livox `offset_time` in nanoseconds, IMU message interval fetch, gyro-only delta rotation before full preintegration | Ceres optimization, feature extraction, sliding-window LIO initialization, full IMU preintegration state | Adopted nanosecond point-time handling and interval coverage thinking; did not use optimization or acceleration preintegration |
-| `livox_ros_driver2` | MID360 ROS2 topics and fields: `CustomPoint.offset_time`, `CustomMsg.timebase`, PointCloud2 `timestamp`, IMU topic and frame behavior | CustomMsg-specific subscription in this package | Kept input as `sensor_msgs/msg/PointCloud2`; supports `timestamp` and `offset_time`, with configurable units |
+| `livox_ros_driver2` | MID360 ROS2 topics and fields: `CustomPoint.offset_time`, `CustomMsg.timebase`, PointCloud2 `timestamp`, IMU topic and frame behavior | Livox LIO or odometry publication | Supports both `sensor_msgs/msg/PointCloud2` and direct `livox_ros_driver2/msg/CustomMsg` input; CustomMsg uses per-point `offset_time` directly |
 
 ## Final Implementation Choice
 
@@ -71,7 +71,7 @@ From the local `livox_ros_driver2` source:
 - The driver fills `timestamp` with each point timestamp in nanoseconds.
 - The IMU message is published as `sensor_msgs/msg/Imu`.
 
-Therefore this package supports both relative `offset_time` and absolute `timestamp`, keeps `point_time_unit` configurable, and normalizes point times by subtracting the minimum point time in each scan before deskew. For local `livox_ros_driver2` PointCloud2 output, use:
+Therefore this package supports both relative `offset_time` and absolute `timestamp` in PointCloud2, keeps `point_time_unit` configurable, and normalizes point times by subtracting the minimum point time in each scan before deskew. For local `livox_ros_driver2` PointCloud2 output, use:
 
 ```yaml
 point_time_field: "timestamp"
@@ -83,4 +83,13 @@ or, if your driver exports an `offset_time` PointCloud2 field:
 ```yaml
 point_time_field: "offset_time"
 point_time_unit: "nanosecond"
+```
+
+If PointCloud2 does not include any per-point time field, use direct CustomMsg input instead:
+
+```yaml
+cloud_input_type: "custom_msg"
+custom_cloud_topic: "/livox/lidar"
+custom_msg_offset_unit: "nanosecond"
+custom_msg_timebase_type: "ros_header"
 ```

@@ -457,12 +457,12 @@ controller_server:
         velocity_direction_min_speed: 0.05
 
         use_curvature_cost: true
-        curvature_weight: 0.1
+        curvature_weight: 0.4
         max_reference_curvature: 5.0
         max_candidate_curvature: 8.0
 
         use_acceleration_cost: true
-        acceleration_weight: 0.05
+        acceleration_weight: 0.1
         max_reference_acceleration: 5.0
         max_candidate_acceleration: 8.0
 

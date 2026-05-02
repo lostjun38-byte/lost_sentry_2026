@@ -14,7 +14,8 @@
 
 订阅：
 
-- `/mid360/points`：`sensor_msgs/msg/PointCloud2`
+- `/mid360/points`：`sensor_msgs/msg/PointCloud2`，当 `cloud_input_type: "pointcloud2"` 时使用
+- `/livox/lidar`：`livox_ros_driver2/msg/CustomMsg`，当 `cloud_input_type: "custom_msg"` 时使用，话题由 `custom_cloud_topic` 配置
 - `/odom`：`nav_msgs/msg/Odometry`
 - `/mid360/imu`：`sensor_msgs/msg/Imu`
 - TF：`base_link -> mid360_link`
@@ -24,7 +25,7 @@
 
 - `/mid360/points_deskewed`：`sensor_msgs/msg/PointCloud2`
 
-输出点云会尽量保持输入 `PointCloud2` 的原始字段和布局，只修改 `x/y/z`。距离过滤或无效点会在 `keep_size_nan` 模式下写成 NaN，不改变点数。
+PointCloud2 输入时，输出点云会尽量保持输入 `PointCloud2` 的原始字段和布局，只修改 `x/y/z`。CustomMsg 输入时，输出会转换为 `PointCloud2`，包含 `x/y/z/intensity/offset_time/tag/line`。距离过滤或无效点会在 `keep_size_nan` 模式下写成 NaN，不改变点数；CustomMsg 输入也支持 `filter_mode: "compact"` 压缩掉无效点。
 
 ## 坐标系
 
@@ -43,6 +44,14 @@ odom
 ```text
 T_odom_base(t)
 ```
+
+更一般地说，`odom_topic` 的消息语义必须是：
+
+```text
+T_fixed_base(t)
+```
+
+其中 `odom.header.frame_id` 应等于 `fixed_frame`，`odom.child_frame_id` 应等于 `base_frame`。节点会对这两个 frame 做 throttle warning；frame 不一致时，去畸变时间和坐标语义都可能错。
 
 然后通过静态外参计算：
 
@@ -100,6 +109,8 @@ p_corrected = T_rel * p_raw
 
 `rotation_source: "imu"` 是第一版推荐设置。`rotation_source: "odom"` 会保留 odom 相对旋转；`rotation_source: "fused"` 目前只是 odom 相对旋转和 IMU 相对旋转的 50/50 四元数 slerp，适合作为实验对比，不建议一开始就依赖。
 
+`imu_rotation_sign: 1.0` 用于 IMU 旋转方向验证。正常保持 `1.0`；如果 `imu_only` 去畸变比 raw 点云更差，可以临时设为 `-1.0` 做对比，同时检查 quaternion 方向、gyro frame、`q_i_to_ref / q_ref_to_i` 语义。
+
 ## 配置文件
 
 默认 launch 加载：
@@ -113,9 +124,17 @@ config/mid360_deskew_odom_imu.yaml
 - `config/mid360_deskew_odom.yaml`
 - `config/mid360_deskew_imu_only.yaml`
 
+Livox CustomMsg 输入配置：
+
+- `config/mid360_deskew_custom_odom.yaml`
+- `config/mid360_deskew_custom_odom_imu.yaml`
+- `config/mid360_deskew_custom_imu_only.yaml`
+
 兼容入口：
 
 - `config/mid360_deskew.yaml`，内容与增强默认配置一致
+
+本包直接依赖 `livox_ros_driver2` 来 include `livox_ros_driver2/msg/custom_msg.hpp`。如果系统没有安装该包，需要先安装或把 `livox_ros_driver2` 源码放入工作区一起编译。
 
 运行：
 
@@ -130,6 +149,13 @@ ros2 launch mid360_deskew mid360_deskew.launch.py
 ```bash
 ros2 launch mid360_deskew mid360_deskew.launch.py \
   config_file:=/home/lost/nav_1_ws/src/mid360_deskew/config/mid360_deskew_odom.yaml
+```
+
+如果 `/mid360/points` 的 PointCloud2 没有每点时间字段，推荐改用 CustomMsg：
+
+```bash
+ros2 launch mid360_deskew mid360_deskew.launch.py \
+  config_file:=/home/lost/nav_1_ws/src/mid360_deskew/config/mid360_deskew_custom_odom.yaml
 ```
 
 建议初始时间偏移先全部设为 0：
@@ -182,6 +208,47 @@ point_time_unit: "nanosecond"
 ```
 
 如果找不到点时间字段且 `drop_if_no_point_time: true`，节点会丢弃该帧，不会发布错误的“去畸变”点云。
+
+## Livox CustomMsg Input
+
+如果 `/mid360/points` 的 `sensor_msgs/msg/PointCloud2` 没有 `offset_time`、`time`、`timestamp` 或 `t` 字段，就不能可靠做 per-point deskew。此时应优先使用 `livox_ros_driver2/msg/CustomMsg`，因为它的每个点包含 `offset_time`。
+
+常用配置：
+
+```yaml
+cloud_input_type: "custom_msg"
+custom_cloud_topic: "/livox/lidar"
+custom_msg_timebase_type: "ros_header"
+custom_msg_offset_unit: "nanosecond"
+cloud_stamp_type: "scan_start"
+```
+
+CustomMsg 路径会直接读取 `points[i].offset_time`，用本帧最小 offset 做归一化，然后计算：
+
+```text
+t_i = scan_start + (offset_time_i - min_offset_time)
+```
+
+不要把 `offset_time` 当作绝对 ROS 时间。`custom_msg_timebase_type: "ros_header"` 是默认推荐值，会使用 `msg.header.stamp`，再按 `cloud_stamp_type` 判断它代表 scan_start 还是 scan_end。
+
+`custom_msg_timebase_type: "custom_timebase"` 第一版不会直接拿 `msg.timebase` 查询 Odin1 odom，而是打印 warning 并 fallback 到 `msg.header.stamp`。只有在 Livox timebase 已经与 ROS time、Odin1 `/odom`、MID360 IMU 时间同步后，才应该考虑真正启用 `timebase` 查询。
+
+输出仍然是：
+
+```text
+/mid360/points_deskewed  sensor_msgs/msg/PointCloud2
+```
+
+CustomMsg 输出 PointCloud2 的 `offset_time` 字段保留 raw Livox `offset_time`。内部去畸变使用的是 `normalized_offset = raw_offset - min_raw_offset`；输出的 `offset_time` 仅用于调试和追溯，不建议下游再拿它做二次 deskew。
+
+如果去畸变后更差，优先检查：
+
+- `custom_msg_offset_unit`
+- `cloud_stamp_type`
+- `cloud_time_offset`
+- `odom_time_offset`
+- `custom_msg_timebase_type`
+- `base_link -> mid360_link` 外参
 
 ## IMU 处理
 
