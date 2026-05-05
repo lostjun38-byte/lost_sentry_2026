@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root BTCPP_format="4">
+  <BehaviorTree ID="patrol">
+    <SequenceWithMemory>
+      <Timeout msec="4000">
+        <Nav2Pose goal="0.3,0.5,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="5.6,3.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="4.8,-4.3,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="2.8,-7.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="8.1,-2.3,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="12.2,2.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="11.2,-3.4,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="9.5,2.5,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+
+      <Timeout msec="10000">
+        <Nav2Pose goal="14.2,5.5,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+
+      <Timeout msec="10000">
+        <Nav2Pose goal="9.5,2.5,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="11.2,-3.4,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="12.2,2.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="8.1,-2.3,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="2.8,-7.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="4.8,-4.3,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+      <Timeout msec="10000">
+        <Nav2Pose goal="5.6,3.0,0.0,0.0,0.0,0.0,0.0"/>
+      </Timeout>
+    </SequenceWithMemory>
+  </BehaviorTree>
+  <!-- 注意：时间没有精细调整，只是大概值，除了保证让仿真中机器人走完，没有考虑其他任何因素！！！ -->
+
+  <!-- Description of Node Models (used by Groot) -->
+  <TreeNodesModel>
+    <Action ID="Nav2Pose">
+      <input_port name="goal"
+                  type="geometry_msgs::msg::PoseStamped_&lt;std::allocator&lt;void&gt; &gt;">goal send to navigator.</input_port>
+    </Action>
+  </TreeNodesModel>
+
+</root>

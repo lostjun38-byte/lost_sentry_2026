@@ -27,6 +27,24 @@
 
 PointCloud2 输入时，输出点云会尽量保持输入 `PointCloud2` 的原始字段和布局，只修改 `x/y/z`。CustomMsg 输入时，输出会转换为 `PointCloud2`，包含 `x/y/z/intensity/offset_time/tag/line`。距离过滤或无效点会在 `keep_size_nan` 模式下写成 NaN，不改变点数；CustomMsg 输入也支持 `filter_mode: "compact"` 压缩掉无效点。
 
+> ⚠️ 注意：输出 PointCloud2 中的 `offset_time` 是 Livox 原始 `offset_time`，不是相对于输出 `cloud.header.stamp` 的时间偏移。
+>
+> 本节点输出的 `cloud.header.stamp` 表示 deskew 后点云对齐到的参考时刻 `t_ref`，例如 `scan_start`、`scan_mid` 或 `scan_end`。
+>
+> 因此不能使用：
+>
+> ```cpp
+> point_time = cloud.header.stamp + offset_time * scale;
+> ```
+>
+> 如果需要重建每个点的原始采样时间，应使用：
+>
+> ```cpp
+> point_time =
+>   actual_scan_start +
+>   (offset_time - min_offset_time_in_this_cloud) * custom_msg_offset_unit_scale;
+> ```
+
 ## 坐标系
 
 推荐 TF 树：

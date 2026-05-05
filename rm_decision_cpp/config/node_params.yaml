@@ -2,7 +2,7 @@
     tree_exec:
         ros__parameters:
             tree_node_model_export_path: /home/lost/lost2026/rm206_ws/src/rm_decision_cpp/behavior_tree/tree_nodes.xml
-            tree_xml_file: /home/lost/lost2026/rm206_ws/src/rm_decision_cpp/behavior_tree/patrol.xml
+            tree_xml_file: /home/lost/lost2026/rm206_ws/src/rm_decision_cpp/behavior_tree/patrol_test_1.xml
             tick_period_milliseconds: 100
             groot_port: 5556
             attack_distance: 2.0

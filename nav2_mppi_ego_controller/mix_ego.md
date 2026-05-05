@@ -209,20 +209,21 @@ ros2 topic echo /ego_reference_trajectory --once
 
 如果 `points[].velocity` 仍主要是 `0.3~0.5`，优先调 Ego 参考轨迹参数：
 
-```bash
-ego_reference_speed:=2.0
-ego_reference_time_step:=0.1
-ego_terminal_slowdown_distance:=0.8
-ego_max_vel:=2.5
-ego_path_sample_interval:=0.4
+```yaml
+# src/ego_planner/config/ego_planner.yaml
+reference_speed: 2.0
+reference_time_step: 0.1
+terminal_slowdown_distance: 0.8
+max_vel: 2.5
+path_sample_interval: 0.4
 ```
 
-- `ego_reference_speed` 是当前最直接的期望巡航速度。
-- `ego_reference_time_step` 是 Ego 参考消息中相邻点的时间间隔，默认应和 MPPI `model_dt=0.05` 保持同一量级；`0.1` 表示 critic 每两个 MPPI 预测步推进一个 Ego 参考点。
-- `ego_reference_speed * ego_reference_time_step` 是发给 MPPI 的参考点弧长间距，默认 `2.0 * 0.1 = 0.2m`。
-- `ego_terminal_slowdown_distance` 只影响局部参考末端减速。它过大时，短局部轨迹大部分都会处于降速段，车会变慢；想让车更敢跑可降到 `0.4~0.6`。
-- `ego_max_vel` 是 Ego 发布参考速度的上限，必须大于等于 `ego_reference_speed`。
-- `ego_path_sample_interval` 影响送入 Ego B-spline 的几何路径点距。它不是最终速度，但过小会让内部 B-spline 时间分配偏慢，过大又会降低绕障轨迹细节。当前建议 `0.3~0.5`。
+- `reference_speed` 是当前最直接的期望巡航速度。
+- `reference_time_step` 是 Ego 参考消息中相邻点的时间间隔，默认应和 MPPI `model_dt=0.05` 保持同一量级；`0.1` 表示 critic 每两个 MPPI 预测步推进一个 Ego 参考点。
+- `reference_speed * reference_time_step` 是发给 MPPI 的参考点弧长间距，默认 `2.0 * 0.1 = 0.2m`。
+- `terminal_slowdown_distance` 只影响局部参考末端减速。它过大时，短局部轨迹大部分都会处于降速段，车会变慢；想让车更敢跑可降到 `0.4~0.6`。
+- `max_vel` 是 Ego 发布参考速度的上限，必须大于等于 `reference_speed`。
+- `path_sample_interval` 影响送入 Ego B-spline 的几何路径点距。它不是最终速度，但过小会让内部 B-spline 时间分配偏慢，过大又会降低绕障轨迹细节。当前建议 `0.3~0.5`。
 
 第二步看 `cmd_vel_controller`：
 
@@ -250,7 +251,7 @@ controller_server:
       gamma: 0.07
 ```
 
-- `vx_max/vy_max/wz_max` 必须覆盖期望速度。若 `ego_reference_speed=2.0`，建议 `vx_max >= 2.3`。
+- `vx_max/vy_max/wz_max` 必须覆盖期望速度。若 `reference_speed=2.0`，建议 `vx_max >= 2.3`。
 - `vx_std/vy_std/wz_std` 决定采样探索范围。上限调高但 std 很小，MPPI 可能很少采到高速候选。高速配置一般保持 `0.7~1.0`。
 - `temperature` 越低越偏向最低 cost 候选，越高越接近平均控制。太高会把快慢候选平均掉，输出变钝；太低可能抖。
 - `gamma` 是控制能量平滑项权重。过大时会偏向小控制量，速度上不去；过小会更激进。
@@ -332,7 +333,7 @@ local_costmap:
 高速时必须保证局部 costmap 覆盖 MPPI 预测距离。经验公式：
 
 ```text
-local_costmap_half_width > ego_reference_speed * time_steps * model_dt + braking_margin
+local_costmap_half_width > reference_speed * time_steps * model_dt + braking_margin
 ```
 
 当前 `2.0m/s * 40 * 0.05 = 4.0m`，`width=10m` 的半宽是 `5m`，刚好够用。如果要跑 `2.5m/s`，预测距离是 `5m`，建议把局部地图加到 `12m` 或缩短预测时域，否则高速候选容易跑出有效地图或撞上未知区域，被 obstacle/cost critic 压掉。
@@ -340,7 +341,7 @@ local_costmap_half_width > ego_reference_speed * time_steps * model_dt + braking
 global costmap 主要影响全局路径和 Ego-Planner 的地图输入。当前 Ego-Planner 默认订阅：
 
 ```yaml
-ego_map_topic: "global_costmap/costmap"
+map_topic: "global_costmap/costmap"
 ```
 
 如果 global costmap 是 rolling window，长全局路径末端经常会超出 Ego 接收到的 OccupancyGrid 边界，Ego 规划会更保守或失败。高速调参时要关注这些日志：
@@ -357,8 +358,10 @@ Ego-Planner 本次规划未生成 trajectory
 
 保守稳定：
 
-```bash
-ego_reference_speed:=1.2 ego_max_vel:=1.5 ego_path_sample_interval:=0.3
+```yaml
+reference_speed: 1.2
+max_vel: 1.5
+path_sample_interval: 0.3
 ```
 
 ```yaml
@@ -371,8 +374,10 @@ EgoTrajectoryCritic.velocity_weight: 0.4
 
 常规快速：
 
-```bash
-ego_reference_speed:=2.0 ego_max_vel:=2.5 ego_path_sample_interval:=0.4
+```yaml
+reference_speed: 2.0
+max_vel: 2.5
+path_sample_interval: 0.4
 ```
 
 ```yaml
@@ -385,8 +390,10 @@ max_accel: [5.0, 5.0, 6.0]
 
 激进高速：
 
-```bash
-ego_reference_speed:=2.4 ego_max_vel:=2.8 ego_terminal_slowdown_distance:=0.5
+```yaml
+reference_speed: 2.4
+max_vel: 2.8
+terminal_slowdown_distance: 0.5
 ```
 
 ```yaml
@@ -405,11 +412,11 @@ max_accel: [6.0, 6.0, 7.0]
 
 | 现象 | 优先检查 | 典型处理 |
 |---|---|---|
-| `/ego_reference_trajectory` 的 `velocity` 只有 `0.3~0.5` | `ego_reference_speed`、`ego_max_vel`、是否重启了新 launch | 提高 `ego_reference_speed`，确认 show-args 有新参数并完全重启 |
+| `/ego_reference_trajectory` 的 `velocity` 只有 `0.3~0.5` | `reference_speed`、`max_vel`、Ego 参数文件是否生效 | 提高 `reference_speed`，确认 `ego_params_file` 指向的 YAML 已更新并完全重启 |
 | Ego 参考速度正常，但 `cmd_vel_controller` 慢 | MPPI critic、local costmap、障碍物代价 | 调 `velocity_weight`、`vx_std`、costmap 尺寸和 obstacle 权重 |
 | `cmd_vel_controller` 快，`cmd_vel` 慢 | velocity smoother | 调 `max_velocity/max_accel/max_decel/deadband` |
 | 直线快、弯道慢 | `velocity_direction_weight`、`PathAlignCritic`、`wz_max` | 适当降低方向约束或提高角速度能力 |
-| 靠近目标过早变慢 | `terminal_slowdown_distance`、GoalCritic 阈值 | 减小 `ego_terminal_slowdown_distance` 或调整 goal critic 触发距离 |
+| 靠近目标过早变慢 | `terminal_slowdown_distance`、GoalCritic 阈值 | 减小 `terminal_slowdown_distance` 或调整 goal critic 触发距离 |
 | 有障碍物时明显慢 | `ObstaclesCritic`、inflation、local costmap | 降低过强 repulsion，确认地图没有虚假障碍 |
 
 ## 短路径保护

@@ -107,6 +107,8 @@ namespace  ego_planner
             void getObstacles(std::vector<ObstacleInfo> &obstacle);
 
             void getTraj();
+            void clearPlanTrajResults();
+            bool isWorldPointOccupied(double x, double y) const;
 
             void setGridMap(PathPoint& cur_pose);
 

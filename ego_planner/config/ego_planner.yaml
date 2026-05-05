@@ -1,0 +1,41 @@
+/**:
+  ros__parameters:
+    use_sim_time: false
+
+    # Basic behavior
+    auto_plan: true
+    frame_id: "map"
+    map_topic: "global_costmap/costmap"
+
+    # Ego trajectory generation
+    local_planning_horizon: 5.0
+    path_sample_interval: 0.4
+    reference_speed: 2.0
+    reference_time_step: 0.1
+    terminal_slowdown_distance: 0.8
+
+    # Robot dynamic limits
+    max_vel: 2.5
+    max_acc: 3.0
+    max_jerk: 4.0
+
+    # Nav2 path lifecycle and dynamic-obstacle replanning
+    input_path_timeout: 3.0
+    replan_cooldown: 0.2
+    trajectory_collision_check_time: 1.5
+    trajectory_collision_check_dt: 0.1
+    trajectory_collision_check_distance: 3.0
+    fallback_trajectory_max_age: 0.5
+    make_plan_warn_time_ms: 100.0
+
+    # Topics
+    local_trajectory_topic: "visual_local_trajectory"
+    ego_trajectory_topic: "/ego_reference_trajectory"
+    input_global_path_topic: "ego_planner/input_path"
+    global_path_topic: "visual_global_path"
+    astar_topic: "trajectories"
+    local_obstacles_topic: "visual_local_obstacles"
+    goal_pose_topic: "goal_pose"
+    clicked_point_topic: "clicked_point"
+    initial_pose_topic: "initialpose"
+    trigger_plan_topic: "trigger_plan"

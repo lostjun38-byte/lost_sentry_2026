@@ -355,6 +355,21 @@ namespace ego_planner
     {
         plan_traj_results = _plan_traj_results_;
     }
+
+    void PlannerInterface::clearPlanTrajResults()
+    {
+        _global_plan_traj_.clear();
+        _plan_traj_results_.clear();
+        a_star_pathes_.clear();
+    }
+
+    bool PlannerInterface::isWorldPointOccupied(double x, double y) const
+    {
+        if (!grid_map_) {
+            return false;
+        }
+        return grid_map_->getInflateOccupancy(Eigen::Vector2d(x, y));
+    }
     
     void PlannerInterface::getAStarPath(vector<vector<Eigen::Vector2d>>& a_star_path)
     {

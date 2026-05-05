@@ -40,7 +40,7 @@ def generate_launch_description():
     tree_node_model_export_path = os.path.join(
         get_package_share_directory('rm_decision_cpp'), 'behavior_tree', 'tree_nodes.xml')
     tree_xml_file= os.path.join(
-        get_package_share_directory('rm_decision_cpp'), 'behavior_tree', 'patrol.xml')
+        get_package_share_directory('rm_decision_cpp'), 'behavior_tree', 'patrol_test_1.xml')
 
 
     # Create the launch description and populate

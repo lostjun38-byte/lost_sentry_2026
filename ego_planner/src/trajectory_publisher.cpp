@@ -42,6 +42,13 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     this->declare_parameter("reference_speed", reference_speed_);
     this->declare_parameter("reference_time_step", reference_time_step_);
     this->declare_parameter("terminal_slowdown_distance", terminal_slowdown_distance_);
+    this->declare_parameter("input_path_timeout", input_path_timeout_);
+    this->declare_parameter("replan_cooldown", replan_cooldown_);
+    this->declare_parameter("trajectory_collision_check_time", trajectory_collision_check_time_);
+    this->declare_parameter("trajectory_collision_check_dt", trajectory_collision_check_dt_);
+    this->declare_parameter("trajectory_collision_check_distance", trajectory_collision_check_distance_);
+    this->declare_parameter("fallback_trajectory_max_age", fallback_trajectory_max_age_);
+    this->declare_parameter("make_plan_warn_time_ms", make_plan_warn_time_ms_);
     this->get_parameter("auto_plan", auto_plan_);
     this->get_parameter("frame_id", frame_id_);
     this->get_parameter("map_topic", map_topic_);
@@ -53,6 +60,13 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     this->get_parameter("reference_speed", reference_speed_);
     this->get_parameter("reference_time_step", reference_time_step_);
     this->get_parameter("terminal_slowdown_distance", terminal_slowdown_distance_);
+    this->get_parameter("input_path_timeout", input_path_timeout_);
+    this->get_parameter("replan_cooldown", replan_cooldown_);
+    this->get_parameter("trajectory_collision_check_time", trajectory_collision_check_time_);
+    this->get_parameter("trajectory_collision_check_dt", trajectory_collision_check_dt_);
+    this->get_parameter("trajectory_collision_check_distance", trajectory_collision_check_distance_);
+    this->get_parameter("fallback_trajectory_max_age", fallback_trajectory_max_age_);
+    this->get_parameter("make_plan_warn_time_ms", make_plan_warn_time_ms_);
     local_planning_horizon_ = std::max(local_planning_horizon_, 0.0);
     max_vel_ = std::max(max_vel_, 1e-3);
     max_acc_ = std::max(max_acc_, 1e-3);
@@ -61,6 +75,13 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     reference_speed_ = std::clamp(reference_speed_, 1e-3, max_vel_);
     reference_time_step_ = std::max(reference_time_step_, 1e-3);
     terminal_slowdown_distance_ = std::max(terminal_slowdown_distance_, 0.0);
+    input_path_timeout_ = std::max(input_path_timeout_, 0.0);
+    replan_cooldown_ = std::max(replan_cooldown_, 0.0);
+    trajectory_collision_check_time_ = std::max(trajectory_collision_check_time_, 0.0);
+    trajectory_collision_check_dt_ = std::max(trajectory_collision_check_dt_, 1e-3);
+    trajectory_collision_check_distance_ = std::max(trajectory_collision_check_distance_, 0.0);
+    fallback_trajectory_max_age_ = std::max(fallback_trajectory_max_age_, 0.0);
+    make_plan_warn_time_ms_ = std::max(make_plan_warn_time_ms_, 0.0);
     should_plan_ = auto_plan_;
 
     const auto global_path_topic = topic_or_default("global_path_topic", "visual_global_path");
@@ -145,6 +166,18 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
         "7. Ego速度参数: max_vel=%.3f, max_acc=%.3f, max_jerk=%.3f, "
         "path_sample_interval=%.3f, reference_speed=%.3f, reference_time_step=%.3f",
         max_vel_, max_acc_, max_jerk_, path_sample_interval_, reference_speed_, reference_time_step_);
+    RCLCPP_INFO(
+        this->get_logger(),
+        "8. Ego动态重规划参数: local_horizon=%.3f, input_path_timeout=%.3f, "
+        "replan_cooldown=%.3f, collision_check_time=%.3f, collision_check_dt=%.3f, "
+        "collision_check_distance=%.3f, fallback_trajectory_max_age=%.3f",
+        local_planning_horizon_,
+        input_path_timeout_,
+        replan_cooldown_,
+        trajectory_collision_check_time_,
+        trajectory_collision_check_dt_,
+        trajectory_collision_check_distance_,
+        fallback_trajectory_max_age_);
     RCLCPP_INFO(this->get_logger(), "=== RViz2设置步骤 ===");
     RCLCPP_INFO(this->get_logger(), "1. 添加Grid显示");
     RCLCPP_INFO(this->get_logger(), "2. 添加2D Nav Goal工具（话题：/goal_pose）");
@@ -175,6 +208,138 @@ void TrajectoryAndObstaclesPublisher::init_ego_planner_base()
     );
 }
 
+void TrajectoryAndObstaclesPublisher::requestReplanLocked(const std::string& reason)
+{
+    needs_replan_ = true;
+    pending_replan_reason_ = reason;
+}
+
+bool TrajectoryAndObstaclesPublisher::inputPathTimedOut(const rclcpp::Time& now) const
+{
+    return active_path_from_input_topic_ &&
+        has_last_input_path_time_ &&
+        input_path_timeout_ > 0.0 &&
+        (now - last_input_path_time_).seconds() > input_path_timeout_;
+}
+
+void TrajectoryAndObstaclesPublisher::clearActiveGoalAndTrajectory(const std::string& reason)
+{
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        has_valid_global_path_ = false;
+        should_plan_ = false;
+        needs_replan_ = false;
+        costmap_updated_ = false;
+        active_path_from_input_topic_ = false;
+        has_last_input_path_time_ = false;
+        has_last_replan_time_ = false;
+        has_last_success_plan_time_ = false;
+        stop_trajectory_active_ = false;
+        pending_replan_reason_.clear();
+        global_plan_traj_.clear();
+        current_ego_traj_.clear();
+        planned_traj.clear();
+        a_star_pathes_.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> plock(planner_mutex_);
+        ego_planner_->clearPlanTrajResults();
+    }
+
+    RCLCPP_INFO(this->get_logger(), "清理 Ego active goal 和轨迹缓存: reason=%s", reason.c_str());
+}
+
+void TrajectoryAndObstaclesPublisher::setStopTrajectory(const PathPoint& stop_pose, const std::string& reason)
+{
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    PathPoint stop_point = stop_pose;
+    stop_point.v = 0.0F;
+    current_ego_traj_.clear();
+    current_ego_traj_.push_back(stop_point);
+    current_ego_traj_.push_back(stop_point);
+    stop_trajectory_active_ = true;
+    RCLCPP_WARN_THROTTLE(
+        this->get_logger(),
+        *this->get_clock(),
+        1000,
+        "发布停车轨迹: reason=%s, pos=(%.3f, %.3f)",
+        reason.c_str(),
+        stop_point.x,
+        stop_point.y);
+}
+
+bool TrajectoryAndObstaclesPublisher::isCurrentTrajectoryBlocked()
+{
+    std::vector<PathPoint> trajectory;
+    bool has_bounds = false;
+    double min_x = 0.0;
+    double max_x = 0.0;
+    double min_y = 0.0;
+    double max_y = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        trajectory = current_ego_traj_;
+        has_bounds = has_costmap_bounds_;
+        min_x = costmap_min_x_;
+        max_x = costmap_max_x_;
+        min_y = costmap_min_y_;
+        max_y = costmap_max_y_;
+    }
+
+    if (!has_bounds || trajectory.size() < 2) {
+        return false;
+    }
+
+    const double max_check_time = trajectory_collision_check_time_;
+    const double max_check_distance = trajectory_collision_check_distance_;
+    const double point_dt = std::max(reference_time_step_, trajectory_collision_check_dt_);
+    double accumulated_distance = 0.0;
+    PathPoint prev = trajectory.front();
+
+    for (size_t i = 0; i < trajectory.size(); ++i) {
+        const auto& point = trajectory[i];
+        const double t = static_cast<double>(i) * point_dt;
+        if (max_check_time > 0.0 && t > max_check_time) {
+            break;
+        }
+
+        if (i > 0) {
+            accumulated_distance += distance(prev, point);
+            prev = point;
+            if (max_check_distance > 0.0 && accumulated_distance > max_check_distance) {
+                break;
+            }
+        }
+
+        if (point.x < min_x || point.x >= max_x || point.y < min_y || point.y >= max_y) {
+            // Rolling costmap 外的点不能在 blocked-check 阶段直接触发重规划。
+            continue;
+        }
+
+        bool occupied = false;
+        {
+            std::lock_guard<std::mutex> plock(planner_mutex_);
+            occupied = ego_planner_->isWorldPointOccupied(point.x, point.y);
+        }
+
+        if (occupied) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "当前 Ego 轨迹短窗口被阻断: t=%.3f, dist=%.3f, pos=(%.3f, %.3f), reason=inflated_occupancy",
+                t,
+                accumulated_distance,
+                point.x,
+                point.y);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // 2D Pose Estimate回调函数
 void TrajectoryAndObstaclesPublisher::pose_estimate_callback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg)
 {
@@ -193,7 +358,7 @@ void TrajectoryAndObstaclesPublisher::pose_estimate_callback(const geometry_msgs
     std::cout << "pose_estimate_callback " << std::endl;
     // 2. 触发规划逻辑（新增）
     if (has_valid_global_path_) {  // 确保已有全局路径
-        needs_replan_ = true;  // 标记需要重新规划
+        requestReplanLocked("pose_update");
         if (should_plan_) {
             RCLCPP_INFO(this->get_logger(), "初始位置更新，触发重新规划！");
         } else {
@@ -207,22 +372,22 @@ void TrajectoryAndObstaclesPublisher::pose_estimate_callback(const geometry_msgs
 // 触发规划话题回调
 void TrajectoryAndObstaclesPublisher::trigger_plan_callback(const std_msgs::msg::Bool::SharedPtr msg)
 {
-    std::lock_guard<std::mutex> lock(data_mutex_);
-    should_plan_ = msg->data;
-    if (should_plan_) {
+    if (!msg->data) {
+        clearActiveGoalAndTrajectory("trigger_plan_false");
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        should_plan_ = true;
         if (has_valid_global_path_) {
-            needs_replan_ = true;
-            RCLCPP_INFO(this->get_logger(), "规划已触发! 路径点: %zu",
-                       global_plan_traj_.size());
+            requestReplanLocked("manual_trigger");
+            RCLCPP_INFO(this->get_logger(), "规划已触发! 路径点: %zu", global_plan_traj_.size());
         } else {
             RCLCPP_WARN(this->get_logger(), "无法触发规划: 没有有效的全局路径!");
         }
-    } else {
-        needs_replan_ = false;
-        planned_traj.clear();
-        RCLCPP_INFO(this->get_logger(), "规划已停止.");
+        flag_ = true;
     }
-    flag_ = msg->data;
 }
 
 void TrajectoryAndObstaclesPublisher::costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg)
@@ -239,9 +404,9 @@ void TrajectoryAndObstaclesPublisher::costmap_callback(const nav_msgs::msg::Occu
         costmap_min_y_ = msg->info.origin.position.y;
         costmap_max_x_ = costmap_min_x_ + static_cast<double>(msg->info.width) * msg->info.resolution;
         costmap_max_y_ = costmap_min_y_ + static_cast<double>(msg->info.height) * msg->info.resolution;
-        if (should_plan_ && has_valid_global_path_) {
-            needs_replan_ = true;
-        }
+        costmap_updated_ = true;
+        last_costmap_update_time_ = this->now();
+        has_last_costmap_update_time_ = true;
 
         if (!flag_) {
             flag_ = true;
@@ -284,8 +449,9 @@ void TrajectoryAndObstaclesPublisher::goal_pose_callback(const geometry_msgs::ms
     start.pose.position.z = 0.0;
     generate_straight_path(start, *msg);
     has_valid_global_path_ = true;
+    active_path_from_input_topic_ = false;
     if (should_plan_) {
-        needs_replan_ = true;
+        requestReplanLocked("new_goal_pose");
     }
     RCLCPP_INFO(
         this->get_logger(), "收到目标点，生成 Ego 全局参考路径: %zu 点", global_plan_traj_.size());
@@ -326,11 +492,12 @@ void TrajectoryAndObstaclesPublisher::rviz_point_callback(const geometry_msgs::m
     global_plan_traj_.push_back(point);
     std::cout << "从RViz接收到全局路径点: (" << point.x << ", " << point.y << ")" << std::endl;
     has_valid_global_path_ = true;
+    active_path_from_input_topic_ = false;
     
     // 如果有路径更新且正在规划中，则标记需要重新规划
     if (should_plan_) 
     {
-        needs_replan_ = true;
+        requestReplanLocked("manual_path_point");
         RCLCPP_INFO(this->get_logger(), "路径更新，已标记需要重新规划");
     }
 }
@@ -338,14 +505,14 @@ void TrajectoryAndObstaclesPublisher::rviz_point_callback(const geometry_msgs::m
 // 原有的全局路径回调
 void TrajectoryAndObstaclesPublisher::rviz_global_path_callback(const nav_msgs::msg::Path::SharedPtr msg)
 {
-    std::lock_guard<std::mutex> lock(data_mutex_);
-
     if (msg->poses.empty())
     {
         RCLCPP_WARN(this->get_logger(), "从RViz接收到空的全局路径!");
-        has_valid_global_path_ = false;
+        clearActiveGoalAndTrajectory("empty_input_path");
         return;
     }
+
+    std::lock_guard<std::mutex> lock(data_mutex_);
 
     global_plan_traj_.clear();
     for (const auto& pose_stamped : msg->poses)
@@ -425,22 +592,18 @@ void TrajectoryAndObstaclesPublisher::rviz_global_path_callback(const nav_msgs::
     cur_pose_.z = tf2::getYaw(q);
 
     has_valid_global_path_ = true;
+    should_plan_ = true;
+    active_path_from_input_topic_ = true;
+    last_input_path_time_ = this->now();
+    has_last_input_path_time_ = true;
     
-    // 如果有路径更新且正在规划中，则标记需要重新规划
-    if (should_plan_) {
-        needs_replan_ = true;
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            2000,
-            "路径更新，已标记需要重新规划");
-    }
+    requestReplanLocked("new_input_path");
     
     RCLCPP_INFO_THROTTLE(
         this->get_logger(),
         *this->get_clock(),
         2000,
-        "收到 Ego 全局参考路径: poses=%zu, topic=%s, start=(%.3f, %.3f), goal=(%.3f, %.3f)",
+        "收到 Ego 全局参考路径: poses=%zu, topic=%s, start=(%.3f, %.3f), goal=(%.3f, %.3f), reason=new_input_path",
         global_plan_traj_.size(),
         input_global_path_topic_.c_str(),
         global_plan_traj_.front().x,
@@ -463,6 +626,54 @@ void TrajectoryAndObstaclesPublisher::rviz_global_path_callback(const nav_msgs::
 //   data_mutex_ 与 planner_mutex_ 任意时刻最多持有一把，绝对不嵌套。
 void TrajectoryAndObstaclesPublisher::publish_and_plan()
 {
+    const auto ros_now = this->now();
+    bool should_clear_timeout = false;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        should_clear_timeout = has_valid_global_path_ && inputPathTimedOut(ros_now);
+    }
+    if (should_clear_timeout) {
+        clearActiveGoalAndTrajectory("input_path_timeout");
+        publish_global_path();
+        publish_planned_trajectory();
+        publish_a_star_path();
+        publish_local_obstacles();
+        return;
+    }
+
+    bool should_check_blocked = false;
+    {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        should_check_blocked =
+            costmap_updated_ &&
+            has_valid_global_path_ &&
+            should_plan_ &&
+            !needs_replan_;
+        costmap_updated_ = false;
+    }
+
+    if (should_check_blocked && isCurrentTrajectoryBlocked()) {
+        bool can_replan = false;
+        {
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            can_replan =
+                !has_last_replan_time_ ||
+                replan_cooldown_ <= 0.0 ||
+                (ros_now - last_replan_time_).seconds() >= replan_cooldown_;
+            if (can_replan && has_valid_global_path_ && should_plan_) {
+                requestReplanLocked("trajectory_blocked");
+            }
+        }
+
+        if (!can_replan) {
+            RCLCPP_DEBUG_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "当前轨迹被阻断，但 replan_cooldown 尚未结束，跳过本次动态重规划触发。");
+        }
+    }
+
     // ========== 1. 快照阶段（持 data_mutex_） ==========
     std::vector<PathPoint> global_traj_snap;
     PathPoint cur_pose_snap;
@@ -470,15 +681,20 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
     bool need_init_grid   = false;
     bool map_received     = false;
     std::string map_topic_copy;
+    std::string replan_reason = "unknown";
     {
         std::lock_guard<std::mutex> lock(data_mutex_);
-        if (needs_replan_ && has_valid_global_path_ && !global_plan_traj_.empty()) {
+        if (needs_replan_ && has_valid_global_path_ && should_plan_ && !global_plan_traj_.empty()) {
             global_traj_snap = global_plan_traj_;       // 拷一份，避免在解锁后被其他 callback 改
             cur_pose_snap    = cur_pose_;
             need_plan        = true;
+            replan_reason    = pending_replan_reason_.empty() ? "unknown" : pending_replan_reason_;
             // 在这里就把 needs_replan_ 置 false：即使 makePlan 长耗时，期间
             // 来的新路径会再次置 true，不会被覆盖
             needs_replan_    = false;
+            pending_replan_reason_.clear();
+            last_replan_time_ = ros_now;
+            has_last_replan_time_ = true;
             need_init_grid   = (!flag_ && !map_from_costmap_);
             if (need_init_grid) flag_ = true;
             map_received     = map_from_costmap_;
@@ -563,7 +779,23 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
             ego_planner_->setCurrentVehiclePos(cur_pose_snap);
 
             // 触发 Ego Planner 规划
+            const auto make_plan_start = std::chrono::steady_clock::now();
             ego_planner_->makePlan();
+            const auto make_plan_elapsed_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - make_plan_start).count();
+            if (make_plan_warn_time_ms_ > 0.0 && make_plan_elapsed_ms > make_plan_warn_time_ms_) {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Ego makePlan 耗时偏高: elapsed_ms=%.3f, reason=%s",
+                    make_plan_elapsed_ms,
+                    replan_reason.c_str());
+            } else {
+                RCLCPP_DEBUG(
+                    this->get_logger(),
+                    "Ego makePlan 完成: elapsed_ms=%.3f, reason=%s",
+                    make_plan_elapsed_ms,
+                    replan_reason.c_str());
+            }
 
             ego_planner_->getAStarPath(a_star_pathes_snap);
             ego_planner_->getLocalPlanTrajResults(debug_planned_traj);
@@ -607,18 +839,58 @@ void TrajectoryAndObstaclesPublisher::publish_and_plan()
                 a_star_pathes_snap.size());
         }
 
+        if (!debug_planned_traj.empty()) {
+            const auto success_time = this->now();
+            std::lock_guard<std::mutex> lock(data_mutex_);
+            current_ego_traj_ = debug_planned_traj;
+            stop_trajectory_active_ = false;
+            last_success_plan_time_ = success_time;
+            has_last_success_plan_time_ = true;
+            a_star_pathes_ = std::move(a_star_pathes_snap);
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Ego makePlan 成功并替换当前轨迹: reason=%s, points=%zu",
+                replan_reason.c_str(),
+                current_ego_traj_.size());
+        } else {
+            const auto fail_time = this->now();
+            bool old_traj_recent = false;
+            bool has_old_traj = false;
+            {
+                std::lock_guard<std::mutex> lock(data_mutex_);
+                has_old_traj = current_ego_traj_.size() >= 2;
+                old_traj_recent =
+                    has_old_traj &&
+                    has_last_success_plan_time_ &&
+                    fallback_trajectory_max_age_ > 0.0 &&
+                    (fail_time - last_success_plan_time_).seconds() <= fallback_trajectory_max_age_;
+                a_star_pathes_ = std::move(a_star_pathes_snap);
+            }
+
+            const bool old_traj_safe = old_traj_recent && !isCurrentTrajectoryBlocked();
+            if (old_traj_safe) {
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    1000,
+                    "Ego makePlan 失败，但旧轨迹仍在短时有效期内且短窗口安全，继续沿用: reason=%s",
+                    replan_reason.c_str());
+            } else {
+                const std::string fail_kind =
+                    replan_reason == "trajectory_blocked" ?
+                    "dynamic_replan_failed_stop" : "initial_or_manual_plan_failed_stop";
+                setStopTrajectory(cur_pose_snap, fail_kind);
+            }
+        }
+
         RCLCPP_INFO_THROTTLE(
                    this->get_logger(),
                    *this->get_clock(),
                    2000,
                    "规划完成! 路径点: %zu",
                    global_traj_snap.size());
-
-        // ========== 3. 写回阶段（再持 data_mutex_） ==========
-        {
-            std::lock_guard<std::mutex> lock(data_mutex_);
-            a_star_pathes_ = std::move(a_star_pathes_snap);
-        }
     }
 
     // ========== 4. 发布阶段（每个 publish_* 自己取需要的锁） ==========
@@ -735,11 +1007,20 @@ void TrajectoryAndObstaclesPublisher::publish_a_star_path()
 // 发布Ego Planner规划后的局部轨迹
 void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
 {
-    // 在 planner_mutex_ 下拿一份本地副本，离开锁后再做发布
     std::vector<PathPoint> planned_traj;
+    bool has_global_path = false;
+    bool should_plan = false;
+    bool needs_replan = false;
+    bool map_received = false;
+    bool stop_trajectory_active = false;
     {
-        std::lock_guard<std::mutex> plock(planner_mutex_);
-        ego_planner_->getLocalPlanTrajResults(planned_traj);
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        planned_traj = current_ego_traj_;
+        has_global_path = has_valid_global_path_;
+        should_plan = should_plan_;
+        needs_replan = needs_replan_;
+        map_received = map_from_costmap_;
+        stop_trajectory_active = stop_trajectory_active_;
     }
 
     nav_msgs::msg::Path visual_traj;
@@ -828,6 +1109,16 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
                 append_reference_point(sample_distance, false);
             }
             append_reference_point(total_distance, true);
+        } else {
+            for (size_t i = 0; i < planned_traj.size(); ++i) {
+                ego_planner_msgs::msg::TrajectoryPoint point;
+                point.x = planned_traj[i].x;
+                point.y = planned_traj[i].y;
+                point.z = planned_traj[i].z;
+                point.yaw = static_cast<float>(yawFromTrajectoryPoint(planned_traj, i));
+                point.velocity = 0.0f;
+                ego_traj.points.push_back(point);
+            }
         }
     }
 
@@ -842,10 +1133,10 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
             "发布空 Ego 参考轨迹: topic=%s, has_global_path=%s, should_plan=%s, "
             "needs_replan=%s, map_received=%s",
             ego_trajectory_topic_.c_str(),
-            has_valid_global_path_ ? "true" : "false",
-            should_plan_ ? "true" : "false",
-            needs_replan_ ? "true" : "false",
-            map_from_costmap_ ? "true" : "false");
+            has_global_path ? "true" : "false",
+            should_plan ? "true" : "false",
+            needs_replan ? "true" : "false",
+            map_received ? "true" : "false");
     } else if (ego_traj.points.empty()) {
         RCLCPP_WARN_THROTTLE(
             this->get_logger(),
@@ -854,6 +1145,17 @@ void TrajectoryAndObstaclesPublisher::publish_planned_trajectory()
             "发布空 Ego 时间参考轨迹: topic=%s, bspline_points=%zu",
             ego_trajectory_topic_.c_str(),
             planned_traj.size());
+    } else if (stop_trajectory_active) {
+        const auto & first = ego_traj.points.front();
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            1000,
+            "已发布 Ego 停车参考轨迹: topic=%s, reference_points=%zu, pos=(%.3f, %.3f)",
+            ego_trajectory_topic_.c_str(),
+            ego_traj.points.size(),
+            first.x,
+            first.y);
     } else {
         const auto & first = ego_traj.points.front();
         const auto & last = ego_traj.points.back();

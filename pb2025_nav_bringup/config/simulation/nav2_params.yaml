@@ -432,7 +432,7 @@ controller_server:
       temperature: 0.3 # 0 mean use control with best cost, huge value will lead to just taking mean of all trajectories without cost consideration.
       gamma: 0.07 # A trade-off between smoothness (high) and low energy (low). This is a complex parameter that likely won’t need to be changed from the default.
       motion_model: "Omni"
-      visualize: true # set to true to visualize the trajectories, but it will slow down the computation by a lot
+      visualize: false # set to true to visualize the trajectories, but it will slow down the computation by a lot
       reset_period: 1.0 # Required time of inactivity to reset optimizer (only in Humble
       regenerate_noises: false
       retry_attempt_limit: 3 # Number of attempts to find feasible trajectory on failure for soft-resets before reporting total failure.
@@ -446,13 +446,13 @@ controller_server:
       EgoTrajectoryCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 8.0
+        cost_weight: 16.0
 
         ego_trajectory_topic: "/ego_reference_trajectory"
 
         position_weight: 1.0
         yaw_weight: 0.1
-        velocity_weight: 0.2
+        velocity_weight: 0.5
         velocity_direction_weight: 0.4
         velocity_direction_min_speed: 0.05
 

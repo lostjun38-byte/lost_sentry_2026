@@ -59,6 +59,10 @@ public:
 private:
     void init_ego_planner_base();
     void publish_and_plan();
+    void clearActiveGoalAndTrajectory(const std::string& reason);
+    bool inputPathTimedOut(const rclcpp::Time& now) const;
+    bool isCurrentTrajectoryBlocked();
+    void setStopTrajectory(const PathPoint& stop_pose, const std::string& reason);
     
     // 回调函数
     void rviz_global_path_callback(const nav_msgs::msg::Path::SharedPtr msg);
@@ -84,6 +88,7 @@ private:
                            double interval = 0.4);
 
     double distance(const PathPoint& p1, const PathPoint& p2);
+    void requestReplanLocked(const std::string& reason);
 
     // ROS 2发布者/订阅者
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr global_path_pub_;
@@ -114,10 +119,23 @@ private:
     bool has_valid_global_path_;
     bool should_plan_;
     bool needs_replan_;  // 新增：是否需要重新规划的标志
+    bool costmap_updated_ = false;
+    bool active_path_from_input_topic_ = false;
+    bool has_last_input_path_time_ = false;
+    bool has_last_costmap_update_time_ = false;
+    bool has_last_replan_time_ = false;
+    bool has_last_success_plan_time_ = false;
+    bool stop_trajectory_active_ = false;
     bool map_from_costmap_ = false;
     bool has_costmap_bounds_ = false;
     bool flag_ = false;
     std::vector<PathPoint> planned_traj;
+    std::vector<PathPoint> current_ego_traj_;
+    std::string pending_replan_reason_;
+    rclcpp::Time last_input_path_time_;
+    rclcpp::Time last_costmap_update_time_;
+    rclcpp::Time last_replan_time_;
+    rclcpp::Time last_success_plan_time_;
 
     PathPoint  cur_pose_;
 
@@ -134,6 +152,13 @@ private:
     double reference_speed_ = 2.0;
     double reference_time_step_ = 0.1;
     double terminal_slowdown_distance_ = 0.8;
+    double input_path_timeout_ = 3.0;
+    double replan_cooldown_ = 0.2;
+    double trajectory_collision_check_time_ = 1.5;
+    double trajectory_collision_check_dt_ = 0.1;
+    double trajectory_collision_check_distance_ = 3.0;
+    double fallback_trajectory_max_age_ = 0.5;
+    double make_plan_warn_time_ms_ = 100.0;
     double map_resolution_ = 0.1;
     double map_x_size_ = 50.0;
     double map_y_size_ = 50.0;
