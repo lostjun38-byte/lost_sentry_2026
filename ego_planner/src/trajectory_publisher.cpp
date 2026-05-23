@@ -104,44 +104,61 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     ego_trajectory_pub_ = this->create_publisher<ego_planner_msgs::msg::Trajectory>(ego_trajectory_topic_, 10);
     obs_local_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(local_obstacles_topic, 10);
 
+    // 1.5 创建 callback group：把"重活定时器"和"输入 callback"分到不同组，
+    //     这样即使 publish_and_plan 卡在 makePlan 里，输入 callback 仍可被调度
+    //     （MultiThreadedExecutor 默认每个 callback 进 MutuallyExclusive group，会串行）。
+    plan_cb_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);   // 定时器自身不重入
+    io_cb_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant);           // 输入 callback 彼此可并行
+
+    rclcpp::SubscriptionOptions io_opts;
+    io_opts.callback_group = io_cb_group_;
+
     // 2. 创建订阅者（接收RViz下发的数据）
     rviz_global_path_sub_ = this->create_subscription<nav_msgs::msg::Path>(
         input_global_path_topic_,
         10,
-        std::bind(&TrajectoryAndObstaclesPublisher::rviz_global_path_callback, this, std::placeholders::_1)
+        std::bind(&TrajectoryAndObstaclesPublisher::rviz_global_path_callback, this, std::placeholders::_1),
+        io_opts
     );
 
     goal_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
         goal_pose_topic,
         10,
-        std::bind(&TrajectoryAndObstaclesPublisher::goal_pose_callback, this, std::placeholders::_1)
+        std::bind(&TrajectoryAndObstaclesPublisher::goal_pose_callback, this, std::placeholders::_1),
+        io_opts
     );
 
     // 路径添加：使用Publish Point工具逐个添加
     rviz_point_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
         clicked_point_topic,
         10,
-        std::bind(&TrajectoryAndObstaclesPublisher::rviz_point_callback, this, std::placeholders::_1)
+        std::bind(&TrajectoryAndObstaclesPublisher::rviz_point_callback, this, std::placeholders::_1),
+        io_opts
     );
 
     // 使用 2D Pose Estimate 更新当前位姿
     pose_estimate_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         initial_pose_topic,
         10,
-        std::bind(&TrajectoryAndObstaclesPublisher::pose_estimate_callback, this, std::placeholders::_1)
+        std::bind(&TrajectoryAndObstaclesPublisher::pose_estimate_callback, this, std::placeholders::_1),
+        io_opts
     );
 
     // 3. 触发规划的话题
     trigger_plan_sub_ = this->create_subscription<std_msgs::msg::Bool>(
         trigger_plan_topic,
         10,
-        std::bind(&TrajectoryAndObstaclesPublisher::trigger_plan_callback, this, std::placeholders::_1)
+        std::bind(&TrajectoryAndObstaclesPublisher::trigger_plan_callback, this, std::placeholders::_1),
+        io_opts
     );
 
     costmap_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
         map_topic,
         rclcpp::QoS(10),
-        std::bind(&TrajectoryAndObstaclesPublisher::costmap_callback, this, std::placeholders::_1)
+        std::bind(&TrajectoryAndObstaclesPublisher::costmap_callback, this, std::placeholders::_1),
+        io_opts
     );
 
     // 4. 初始化Ego Planner基础配置
@@ -150,7 +167,8 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     // 5. 定时器：5Hz触发规划与发布
     timer_ = this->create_wall_timer(
         std::chrono::milliseconds(200),
-        std::bind(&TrajectoryAndObstaclesPublisher::publish_and_plan, this)
+        std::bind(&TrajectoryAndObstaclesPublisher::publish_and_plan, this),
+        plan_cb_group_
     );
 
     RCLCPP_INFO(this->get_logger(), "Interactive Ego Planner Node Ready!");

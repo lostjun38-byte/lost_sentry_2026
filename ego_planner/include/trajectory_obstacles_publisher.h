@@ -106,6 +106,8 @@ private:
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
     
     rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::CallbackGroup::SharedPtr plan_cb_group_;   // 独占给 publish_and_plan timer
+    rclcpp::CallbackGroup::SharedPtr io_cb_group_;     // 输入 callback 共用（与 plan 解耦）
 
     // Ego Planner核心对象
     std::shared_ptr<PlannerInterface> ego_planner_;
