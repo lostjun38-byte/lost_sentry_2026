@@ -17,8 +17,7 @@
 
 #include <memory>
 #include <string>
-#include <vector>
-
+#include <chrono>
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
 #include "pcl/io/pcd_io.h"
 #include "rclcpp/rclcpp.hpp"
@@ -55,7 +54,6 @@ private:
   float global_leaf_size_;
   float registered_leaf_size_;
   float max_dist_sq_;
-  std::vector<double> init_pose_;
 
   std::string map_frame_;
   std::string odom_frame_;
@@ -64,7 +62,6 @@ private:
   std::string robot_base_frame_;
   std::string lidar_frame_;
   std::string current_scan_frame_id_;
-  std::string input_cloud_topic_;
   rclcpp::Time last_scan_time_;
   Eigen::Isometry3d result_t_;
   Eigen::Isometry3d previous_result_t_;
@@ -87,6 +84,21 @@ private:
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+
+  // ---- startup high freq -> stable stop ----
+  void startRegistrationTimer(std::chrono::milliseconds period);
+  void stopRegistrationTimer();
+
+  bool has_result_{true};
+  rclcpp::Time startup_begin_time_;
+  int consecutive_stable_{0};
+
+  double startup_registration_hz_{5.0};
+  double startup_timeout_sec_{15.0};
+  int stop_after_consecutive_good_{5};
+  double stable_translation_eps_{0.05};      // meters
+  double stable_rotation_eps_deg_{2.0};      // degrees
+
 };
 
 }  // namespace small_gicp_relocalization
