@@ -1212,7 +1212,7 @@ void Node::txLoop()
                     double dt_since = (this->now() - last_drift_update_).seconds();
                     double predicted_drift = gimbal_big_drift_ + gimbal_big_drift_rate_ * dt_since;
                     gimbal_big_yaw_angle_state_ = gimbal_big_yaw_angle_ + predicted_drift;
-                    pkt.data.gimbal_big.yaw_angle = -gimbal_big_yaw_angle_state_;
+                    pkt.data.gimbal_big.yaw_angle = gimbal_big_yaw_angle_state_;
                         RCLCPP_DEBUG_THROTTLE(
                         this->get_logger(),
                         *this->get_clock(),
@@ -1222,7 +1222,7 @@ void Node::txLoop()
                     );
                     pkt.data.gimbal_big.yaw_vel = 0.0f;
                 } else {
-                    pkt.data.gimbal_big.yaw_angle = -gimbal_big_yaw_angle_state_;  // 角度过期，继续发布预测的角度，但不再更新预测值（相当于冻结在最后一个有效角度）。去除了速度控制
+                    pkt.data.gimbal_big.yaw_angle = gimbal_big_yaw_angle_state_;  // 角度过期，继续发布预测的角度，但不再更新预测值（相当于冻结在最后一个有效角度）。去除了速度控制
                     pkt.data.gimbal_big.yaw_vel = 0.0f;
                 }
 

@@ -99,3 +99,5 @@ core.*
 # 7. others
 # ==========================================
 rm_gazebo
+rm_sentry_pp_nocrc_serial
+rm_decision
