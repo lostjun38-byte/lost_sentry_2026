@@ -33,6 +33,7 @@ CTestTestfile.cmake
 *.exe
 *.out
 *.app
+*.pyc
 
 # ==========================================
 # 3. 编辑器与 IDE 配置文件 (Editors & IDEs)

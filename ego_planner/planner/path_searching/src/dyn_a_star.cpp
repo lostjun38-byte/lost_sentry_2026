@@ -1,4 +1,5 @@
 #include "path_searching/dyn_a_star.h"
+#include <cmath>
 
 using namespace std;
 using namespace Eigen;
@@ -95,15 +96,32 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector2d start_pt, Vector2d en
     if (!Coord2Index(start_pt, start_idx) || !Coord2Index(end_pt, end_idx))
         return false;
 
+    // 调整迭代上限：A* pool 最长对角线 / step_size 的 1.5 倍，再加一个安全裕度。
+    // 防止 start_pt 推进越过 end_pt 后在终点附近震荡导致永真死循环。
+    const int max_adjust_iter =
+        static_cast<int>(std::ceil(1.5 * std::hypot(
+            static_cast<double>(POOL_SIZE_(0)),
+            static_cast<double>(POOL_SIZE_(1))))) + 16;
+
     // 检查起点是否在障碍物内，若在则向终点方向调整（仅x、y方向）
     if (checkOccupancy(Index2Coord(start_idx)))
     {
+        const Vector2d initial_dir = end_pt - start_pt;
+        int iter = 0;
         do
         {
+            if (++iter > max_adjust_iter) {
+                std::cerr << "[AStar] start_pt adjust exceeded max_iter="
+                          << max_adjust_iter << "; aborting search." << std::endl;
+                return false;
+            }
             // 沿起点到终点方向移动一步（仅x、y）
             const Vector2d delta = end_pt - start_pt;
             const double delta_norm = delta.norm();
             if (delta_norm < kMinDirectionNorm)
+                return false;
+            // 若已经穿越 end_pt（方向反转），停止震荡
+            if (delta.dot(initial_dir) <= 0.0)
                 return false;
             Vector2d dir = delta / delta_norm;
             start_pt += dir * step_size_;
@@ -115,12 +133,22 @@ bool AStar::ConvertToIndexAndAdjustStartEndPoints(Vector2d start_pt, Vector2d en
     // 检查终点是否在障碍物内，若在则向起点方向调整（仅x、y方向）
     if (checkOccupancy(Index2Coord(end_idx)))
     {
+        const Vector2d initial_dir = start_pt - end_pt;
+        int iter = 0;
         do
         {
+            if (++iter > max_adjust_iter) {
+                std::cerr << "[AStar] end_pt adjust exceeded max_iter="
+                          << max_adjust_iter << "; aborting search." << std::endl;
+                return false;
+            }
             // 沿终点到起点方向移动一步（仅x、y）
             const Vector2d delta = start_pt - end_pt;
             const double delta_norm = delta.norm();
             if (delta_norm < kMinDirectionNorm)
+                return false;
+            // 若已经穿越 start_pt（方向反转），停止震荡
+            if (delta.dot(initial_dir) <= 0.0)
                 return false;
             Vector2d dir = delta / delta_norm;
             end_pt += dir * step_size_;
