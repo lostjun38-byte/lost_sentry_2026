@@ -315,6 +315,9 @@ void Node::updateGimbalFromCachedPath()
         target_x = local_path.poses.back().pose.position.x;
         target_y = local_path.poses.back().pose.position.y;
         target_yaw_in_map = extractYaw(local_path.poses.back().pose.orientation); // 这里反而需要直接使用这个角度，全局规划器给出的方向是在 哨兵坐标系下的 ，可以直接用
+        // target_yaw_in_map = std::atan2(
+        // std::sin(target_yaw_in_map + M_PI),
+        // std::cos(target_yaw_in_map + M_PI)); // 为了mid360朝前，增加pi
     }
 
 

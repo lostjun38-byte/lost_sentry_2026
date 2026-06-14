@@ -29,6 +29,7 @@ from nav2_common.launch import RewrittenYaml
 def generate_launch_description():
     # Get the launch directory
     bringup_dir = get_package_share_directory("pb2025_nav_bringup")
+    ego_planner_dir = get_package_share_directory("ego_planner")
     launch_dir = os.path.join(bringup_dir, "launch")
 
     # Create the launch configuration variables
@@ -45,6 +46,8 @@ def generate_launch_description():
     rviz_config_file = LaunchConfiguration("rviz_config_file")
     use_robot_state_pub = LaunchConfiguration("use_robot_state_pub")
     use_rviz = LaunchConfiguration("use_rviz")
+    use_ego_planner = LaunchConfiguration("use_ego_planner")
+    ego_params_file = LaunchConfiguration("ego_params_file")
 
     # Declare the launch arguments
     declare_namespace_cmd = DeclareLaunchArgument(
@@ -55,13 +58,13 @@ def generate_launch_description():
 
     declare_slam_cmd = DeclareLaunchArgument(
         "slam",
-        default_value="True",
+        default_value="False",
         description="Whether run a SLAM. If True, it will disable small_gicp and send static tf (map->odom)",
     )
 
     declare_world_cmd = DeclareLaunchArgument(
         "world",
-        default_value="rmul_2024",
+        default_value="test_gai",
         description="Select world: 'rmul_2024' or 'rmuc_2024' (map file share the same name as the this parameter)",
     )
 
@@ -145,6 +148,18 @@ def generate_launch_description():
         allow_substs=True,
     )
 
+    declare_use_ego_planner_cmd = DeclareLaunchArgument(
+        "use_ego_planner",
+        default_value="true",
+        description="Whether to start ego_planner reference trajectory publisher",
+    )
+    
+    declare_ego_params_file_cmd = DeclareLaunchArgument(
+        "ego_params_file",
+        default_value=os.path.join(ego_planner_dir, "config", "ego_planner.yaml"),
+        description="Full path to the ego_planner parameter file",
+    )
+
     start_robot_state_publisher_cmd = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(launch_dir, "robot_state_publisher_launch.py")
@@ -191,6 +206,18 @@ def generate_launch_description():
         }.items(),
     )
 
+    ego_planner_cmd = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(ego_planner_dir, "launch", "ego_planner.launch.py")
+        ),
+        condition=IfCondition(use_ego_planner),
+        launch_arguments={
+            "namespace": namespace,
+            "use_sim_time": use_sim_time,
+            "params_file": ego_params_file,
+        }.items(),
+    )
+
     # joy_teleop_cmd = IncludeLaunchDescription(
     #     PythonLaunchDescriptionSource(os.path.join(launch_dir, "joy_teleop_launch.py")),
     #     launch_arguments={
@@ -228,11 +255,14 @@ def generate_launch_description():
     ld.add_action(declare_use_robot_state_pub_cmd)
     ld.add_action(declare_use_rviz_cmd)
     ld.add_action(declare_use_respawn_cmd)
+    ld.add_action(declare_use_ego_planner_cmd)
+    ld.add_action(declare_ego_params_file_cmd)
 
     # Add the actions to launch all of the navigation nodes
     ld.add_action(start_robot_state_publisher_cmd)
     ld.add_action(start_livox_ros_driver2_node)
     ld.add_action(bringup_cmd)
+    ld.add_action(ego_planner_cmd)
     # ld.add_action(joy_teleop_cmd)
     ld.add_action(rviz_cmd)
     ld.add_action(foxglove_bridge)

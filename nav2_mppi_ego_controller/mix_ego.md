@@ -110,6 +110,7 @@ EgoTrajectoryCritic:
   acceleration_weight: 0.05
   max_reference_acceleration: 5.0
   max_candidate_acceleration: 8.0
+
   velocity_frame: "base"
 
   max_reference_age: 0.5

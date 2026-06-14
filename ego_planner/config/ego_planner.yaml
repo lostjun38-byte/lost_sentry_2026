@@ -5,17 +5,17 @@
     # Basic behavior
     auto_plan: true
     frame_id: "map"
-    map_topic: "global_costmap/costmap"
+    map_topic: "/global_costmap/costmap_raw"
 
     # Ego trajectory generation
     local_planning_horizon: 5.0
     path_sample_interval: 0.4
     reference_speed: 2.0
     reference_time_step: 0.1
-    terminal_slowdown_distance: 0.8
+    terminal_slowdown_distance: 2.0
 
     # Robot dynamic limits
-    max_vel: 2.5
+    max_vel: 1.5
     max_acc: 3.0
     max_jerk: 4.0
 

@@ -157,16 +157,16 @@ def generate_launch_description():
                 parameters=[configured_params],
                 arguments=["--ros-args", "--log-level", log_level],
             ),
-            Node(
-                package="small_gicp_relocalization",
-                executable="small_gicp_relocalization_node",
-                name="small_gicp_relocalization",
-                output="screen",
-                respawn=use_respawn,
-                respawn_delay=2.0,
-                parameters=[configured_params, {"prior_pcd_file": prior_pcd_file}],
-                arguments=["--ros-args", "--log-level", log_level],
-            ),
+            # Node(
+            #     package="small_gicp_relocalization",
+            #     executable="small_gicp_relocalization_node",
+            #     name="small_gicp_relocalization",
+            #     output="screen",
+            #     respawn=use_respawn,
+            #     respawn_delay=2.0,
+            #     parameters=[configured_params, {"prior_pcd_file": prior_pcd_file}],
+            #     arguments=["--ros-args", "--log-level", log_level],
+            # ),
             Node(
                 package="nav2_lifecycle_manager",
                 executable="lifecycle_manager",
@@ -192,12 +192,12 @@ def generate_launch_description():
                 name="map_server",
                 parameters=[configured_params],
             ),
-            ComposableNode(
-                package="small_gicp_relocalization",
-                plugin="small_gicp_relocalization::SmallGicpRelocalizationNode",
-                name="small_gicp_relocalization",
-                parameters=[configured_params, {"prior_pcd_file": prior_pcd_file}],
-            ),
+            # ComposableNode(
+            #     package="small_gicp_relocalization",
+            #     plugin="small_gicp_relocalization::SmallGicpRelocalizationNode",
+            #     name="small_gicp_relocalization",
+            #     parameters=[configured_params, {"prior_pcd_file": prior_pcd_file}],
+            # ),
             ComposableNode(
                 package="nav2_lifecycle_manager",
                 plugin="nav2_lifecycle_manager::LifecycleManager",
@@ -210,6 +210,32 @@ def generate_launch_description():
                     }
                 ],
             ),
+        ],
+    )
+
+    start_static_transform_node = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        name="static_transform_publisher_map2odom",
+        output="screen",
+        parameters=[{"use_sim_time": use_sim_time}],
+        arguments=[
+            "--x",
+            "0.0",
+            "--y",
+            "0.0",
+            "--z",
+            "0.0",
+            "--roll",
+            "0.0",
+            "--pitch",
+            "0.0",
+            "--yaw",
+            "0.0",
+            "--frame-id",
+            "map",
+            "--child-frame-id",
+            "odom",
         ],
     )
 
@@ -237,5 +263,6 @@ def generate_launch_description():
     ld.add_action(small_point_lio_node)
     ld.add_action(load_nodes)
     ld.add_action(load_composable_nodes)
+    ld.add_action(start_static_transform_node)
 
     return ld
