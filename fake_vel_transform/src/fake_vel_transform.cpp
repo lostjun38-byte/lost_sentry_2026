@@ -28,14 +28,22 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
 {
   RCLCPP_INFO(get_logger(), "Start FakeVelTransform!");
 
-  this->declare_parameter<std::string>("robot_base_frame", "gimbal_link");
+  this->declare_parameter<std::string>("robot_base_frame", "gimbal_big");
   this->declare_parameter<std::string>("fake_robot_base_frame", "gimbal_link_fake");
   this->declare_parameter<std::string>("odom_topic", "odom");
   this->declare_parameter<std::string>("local_plan_topic", "local_plan");
   this->declare_parameter<std::string>("cmd_spin_topic", "cmd_spin");
-  this->declare_parameter<std::string>("input_cmd_vel_topic", "");
-  this->declare_parameter<std::string>("output_cmd_vel_topic", "");
+  this->declare_parameter<std::string>("input_cmd_vel_topic", "cmd_vel_nav2_result");
+  this->declare_parameter<std::string>("output_cmd_vel_topic", "cmd_vel_chassis");
   this->declare_parameter<float>("init_spin_speed", 0.0);
+  // --- 平滑参数 ---
+  this->declare_parameter<std::string>("smooth_mode", "average");
+  this->declare_parameter<int>("window_size", 5);
+  this->declare_parameter<double>("alpha", 0.7);
+
+  this->get_parameter("smooth_mode", smooth_mode_);
+  this->get_parameter("window_size", window_size_);
+  this->get_parameter("alpha", alpha_);
 
   this->get_parameter("robot_base_frame", robot_base_frame_);
   this->get_parameter("fake_robot_base_frame", fake_robot_base_frame_);
@@ -45,16 +53,16 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
   this->get_parameter("input_cmd_vel_topic", input_cmd_vel_topic_);
   this->get_parameter("output_cmd_vel_topic", output_cmd_vel_topic_);
   this->get_parameter("init_spin_speed", spin_speed_);
-  current_robot_base_angle_ = 0.0;
-  last_controller_activate_time_ = this->now();
-  controller_active_ = false;
+  RCLCPP_INFO(
+    this->get_logger(), "FakeVelTransform: smooth_mode=%s, window_size=%d, alpha=%.2f",
+    smooth_mode_.c_str(), window_size_, alpha_);
 
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
   cmd_vel_chassis_pub_ =
     this->create_publisher<geometry_msgs::msg::Twist>(output_cmd_vel_topic_, 1);
 
-  cmd_spin_sub_ = this->create_subscription<example_interfaces::msg::Float32>(
+  cmd_spin_sub_ = this->create_subscription<rm_decision_interfaces::msg::RobotControl>(
     cmd_spin_topic_, 1, std::bind(&FakeVelTransform::cmdSpinCallback, this, std::placeholders::_1));
   cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
     input_cmd_vel_topic_, 10,
@@ -80,18 +88,17 @@ FakeVelTransform::FakeVelTransform(const rclcpp::NodeOptions & options)
     std::chrono::milliseconds(20), std::bind(&FakeVelTransform::publishTransform, this));
 }
 
-void FakeVelTransform::cmdSpinCallback(const example_interfaces::msg::Float32::SharedPtr msg)
+void FakeVelTransform::cmdSpinCallback(
+  const rm_decision_interfaces::msg::RobotControl::SharedPtr msg)
 {
-  spin_speed_ = msg->data;
+  spin_speed_ = msg->chassis_spin_vel;
+  chassis_vel_multiplier_ = msg->chassis_vel_multi;
 }
 
 void FakeVelTransform::odometryCallback(const nav_msgs::msg::Odometry::ConstSharedPtr & msg)
 {
   // NOTE: Haven't synced with local_plan
-  if (
-    !controller_active_ ||
-    (this->now() - last_controller_activate_time_).seconds() > CONTROLLER_TIMEOUT) {
-    controller_active_ = false;
+  if ((rclcpp::Clock().now() - last_controller_activate_time_).seconds() > CONTROLLER_TIMEOUT) {
     current_robot_base_angle_ = tf2::getYaw(msg->pose.pose.orientation);
   }
 }
@@ -101,13 +108,15 @@ void FakeVelTransform::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr
   std::lock_guard<std::mutex> lock(cmd_vel_mutex_);
   const bool is_zero_vel = std::abs(msg->linear.x) < EPSILON && std::abs(msg->linear.y) < EPSILON &&
                            std::abs(msg->angular.z) < EPSILON;
-  const bool controller_timed_out =
-    controller_active_ &&
-    (this->now() - last_controller_activate_time_).seconds() > CONTROLLER_TIMEOUT;
-  if (is_zero_vel || !controller_active_ || controller_timed_out) {
-    controller_active_ = false;
+  if (
+    is_zero_vel ||
+    (rclcpp::Clock().now() - last_controller_activate_time_).seconds() > CONTROLLER_TIMEOUT) {
     // If received velocity cannot be synchronized, publish it directly
-    auto aft_tf_vel = transformVelocity(msg, current_robot_base_angle_);
+    auto smoothed = smoothVelocity(*msg);
+    auto aft_tf_vel = transformVelocity(
+      std::make_shared<geometry_msgs::msg::Twist>(smoothed), current_robot_base_angle_);
+    aft_tf_vel.linear.x *= chassis_vel_multiplier_;
+    aft_tf_vel.linear.y *= chassis_vel_multiplier_;
     cmd_vel_chassis_pub_->publish(aft_tf_vel);
   } else {
     latest_cmd_vel_ = msg;
@@ -117,8 +126,7 @@ void FakeVelTransform::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr
 void FakeVelTransform::localPlanCallback(const nav_msgs::msg::Path::ConstSharedPtr & /*msg*/)
 {
   // Consider nav2_controller_server is activated when receiving local_plan
-  last_controller_activate_time_ = this->now();
-  controller_active_ = true;
+  last_controller_activate_time_ = rclcpp::Clock().now();
 }
 
 void FakeVelTransform::syncCallback(
@@ -136,7 +144,9 @@ void FakeVelTransform::syncCallback(
 
   current_robot_base_angle_ = tf2::getYaw(odom_msg->pose.pose.orientation);
   float yaw_diff = current_robot_base_angle_;
-  geometry_msgs::msg::Twist aft_tf_vel = transformVelocity(current_cmd_vel, yaw_diff);
+  auto smoothed = smoothVelocity(*current_cmd_vel);
+  geometry_msgs::msg::Twist aft_tf_vel =
+    transformVelocity(std::make_shared<geometry_msgs::msg::Twist>(smoothed), yaw_diff);
 
   cmd_vel_chassis_pub_->publish(aft_tf_vel);
 }

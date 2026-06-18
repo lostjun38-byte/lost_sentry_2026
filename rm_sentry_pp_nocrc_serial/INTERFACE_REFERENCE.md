@@ -31,11 +31,11 @@
 ### 1.3 `plan` (默认话题名，可配)
 - **类型**: `nav_msgs/msg/Path`
 - **回调**: `onPath()`
-- **用途**: 全局路径，gimbal_big 跟随路径朝向
+- **用途**: Ego-Planner 优化后的局部轨迹，gimbal_big 跟随轨迹朝向
 - **字段使用**:
   - `poses[]` → 路径点序列，每个点含 `position.x/y` 和 `orientation`（提取 yaw）
 - **超时**: `gimbal_path_timeout_ms` (默认 1000ms)，超时后停止更新角度
-- **参数**: `gimbal_follow_path_topic` (默认 `"plan"`)
+- **参数**: `gimbal_follow_path_topic` (默认 `"visual_local_trajectory"`)
 
 ### 1.4 `lidar_odometry` (默认话题名，可配)
 - **类型**: `nav_msgs/msg/Odometry`
@@ -315,7 +315,7 @@
   3. 计算速度自适应前瞻距离: `lookahead = base + k * speed`（默认 0.8 + 0.4*v）
   4. 找最近路径点（warm-start 从上次位置搜索）
   5. 沿路径弧长前进 lookahead 距离，插值得到目标点
-  6. 提取目标点的 yaw 作为目标朝向
+  6. 从 Ego 局部轨迹前瞻点的 `pose.orientation` 提取 yaw 作为目标朝向
   7. 低通滤波（alpha=0.3）处理角度跳变
   8. 写入 `gimbal_big_yaw_angle_`
 
@@ -352,7 +352,7 @@
 | `send_period_ms` | int | `5` | 串口发送周期 (ms) |
 | `enable_dtr_rts` | bool | `true` | 是否启用 DTR/RTS |
 | `gimbal_angle_timeout_ms` | int | `300` | gimbal_big 角度有效超时 (ms) |
-| `gimbal_follow_path_topic` | string | `"plan"` | 路径跟随话题 |
+| `gimbal_follow_path_topic` | string | `"visual_local_trajectory"` | 路径跟随话题，默认使用 Ego-Planner 优化后的局部轨迹 |
 | `gimbal_follow_lookahead` | double | `1.5` | 固定前瞻距离（未使用） |
 | `gimbal_lookahead_base` | double | `0.8` | 速度自适应前瞻基础距离 (m) |
 | `gimbal_lookahead_k` | double | `0.4` | 速度自适应前瞻系数 |

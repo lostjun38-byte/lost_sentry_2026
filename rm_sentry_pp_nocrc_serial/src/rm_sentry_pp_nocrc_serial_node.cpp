@@ -32,13 +32,27 @@ Node::Node(const rclcpp::NodeOptions& options)
     RCLCPP_INFO(get_logger(), "Target lost prediction: lambda=%.2f, min_threshold=%.2f",
                 confidence_decay_lambda_, min_confidence_threshold_);
 
-    // Gimbal angle timeout for tracking
+    // gimbal_big 路径跟随相关参数：
+    // 本节点虽然是上下位机 USB 串口通信节点，但它同时负责把导航路径转换成
+    // 下位机可执行的 gimbal_big 目标 yaw 角。这里的“角度”不是底盘 cmd_vel 的角速度，
+    // 而是大云台需要转到的绝对目标角，用于让大云台沿导航路径方向提前转向。
+    //
+    // 注意：这里默认订阅 Ego-Planner 输出的 visual_local_trajectory，而不是 Nav2 原始
+    // 全局 /path 或 controller 的 plan。原因是下位机最终只使用 Path.pose.orientation
+    // 中的 yaw 作为目标转向角；如果继续使用全局路径，yaw 会来自未经过 Ego 局部避障/
+    // B-spline 优化的参考线。visual_local_trajectory 的 orientation 在 ego_planner 中由
+    // 局部轨迹相邻点切线计算，能反映实际发给 MPPI 的避障后路径方向。
     gimbal_angle_timeout_ms_ = declare_parameter<int>("gimbal_angle_timeout_ms", 300);
     posture_confirm_timeout_ms_ = declare_parameter<int>("posture_confirm_timeout_ms", 500);
-    gimbal_follow_path_topic_ = declare_parameter<std::string>("gimbal_follow_path_topic", "plan");
+    gimbal_follow_path_topic_ = declare_parameter<std::string>(
+        "gimbal_follow_path_topic", "visual_local_trajectory");
+    // 历史保留参数：当前实际使用的是 base + k * speed 的速度自适应前瞻距离。
     gimbal_follow_lookahead_ = declare_parameter<double>("gimbal_follow_lookahead", 1.5);
+    // 前瞻距离 = gimbal_lookahead_base_ + gimbal_lookahead_k_ * 底盘速度。
+    // 速度越快，看得越远，避免大云台只盯着车身附近路径点导致转向滞后。
     gimbal_lookahead_base_ = declare_parameter<double>("gimbal_lookahead_base", 0.8);
     gimbal_lookahead_k_ = declare_parameter<double>("gimbal_lookahead_k", 0.4);
+    // 路径点 yaw 可能因规划器刷新或跨越 -pi/pi 边界产生跳变，发送前用一阶低通平滑。
     gimbal_yaw_smooth_alpha_ = declare_parameter<double>("gimbal_yaw_smooth_alpha", 0.3);
     robot_area_name_ = declare_parameter<std::string>("robot_area_name", "bumpy_area");
 
@@ -74,12 +88,19 @@ Node::Node(const rclcpp::NodeOptions& options)
         robot_control_topic_, 10,
         [this](const rm_decision_interfaces::msg::RobotControl::SharedPtr msg) { onRobotControl(*msg); });
 
-    // 全局路径订阅：gimbal_big 跟随路径方向
+    // Ego 局部轨迹订阅：这里不再订阅 Nav2 原始 /path，而是订阅 gimbal_follow_path_topic_
+    // 指向的 Ego-Planner 局部轨迹。路径只在回调里缓存，真正的 gimbal_big 目标角在
+    // 50Hz 定时器中重采样计算。这样可以把 Ego 轨迹发布频率和串口发送频率解耦。
+    //
+    // 下位机最终有用的只是目标 yaw，因此本节点只关心 Path.pose.orientation 中的 yaw。
+    // visual_local_trajectory 的 orientation 由 ego_planner 根据局部轨迹切线方向生成，
+    // 比原始全局 /path 更适合作为大云台/底盘目标转向来源。
     path_sub_ = create_subscription<nav_msgs::msg::Path>(
         gimbal_follow_path_topic_, 10,
         [this](const nav_msgs::msg::Path::SharedPtr msg) { onPath(*msg); });
 
-    // Odometry 订阅
+    // Odometry 订阅：Ego 局部轨迹 yaw 采样需要知道当前底盘在 map 中的位置、朝向和速度。
+    // 位置用于找最近轨迹点，速度用于自适应前瞻距离，朝向用于把车体系速度换算到 map 方向。
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         odom_topic_, 10,
         [this](const nav_msgs::msg::Odometry::SharedPtr msg) { onOdom(*msg); });
@@ -150,7 +171,9 @@ Node::Node(const rclcpp::NodeOptions& options)
     nd.set_invincible(talos::chiral::navigation::ArmorName::Sentry, true);
     chiral_reader_->write(nd);
 
-    // Gimbal 路径跟随高频重采样 timer
+    // Gimbal 路径跟随高频重采样 timer：
+    // 每 20ms 从缓存路径和缓存 odom 中重新计算一次 gimbal_big 目标 yaw。
+    // 计算结果写入 gimbal_big_yaw_angle_，随后由 txLoop() 叠加漂移预测并打包发给下位机。
     gimbal_path_timer_ = create_wall_timer(
         std::chrono::milliseconds(20),  // 50Hz
         [this]() { updateGimbalFromCachedPath(); });
@@ -217,51 +240,77 @@ void Node::onPath(const nav_msgs::msg::Path& msg)
 {
     if (msg.poses.empty()) return;
     std::lock_guard<std::mutex> lk(path_mtx_);
+    // 缓存最新 Ego 局部轨迹，不在订阅回调中直接算角度：
+    // 1. Ego-Planner 发布局部轨迹的频率可能较低或不稳定；
+    // 2. 串口控制需要更稳定的高频目标角；
+    // 3. 后续定时器会结合最新 odom 在轨迹上重新找前瞻点。
+    //
+    // 这里故意缓存完整 nav_msgs/Path，而不是只缓存 yaw：
+    // 下位机最终虽然只使用 yaw，但我们需要根据当前底盘位置和速度在 Ego 轨迹上
+    // 选择一个前瞻点，再取该前瞻点的 orientation yaw。这样目标转向会跟随
+    // Ego-Planner 避障后的局部路径，而不是固定取整条轨迹的首点或终点方向。
     cached_path_ = msg;
     last_path_time_ = this->now();
 }
 
 void Node::updateGimbalFromCachedPath()
 {
+    // 这段是“Ego 局部轨迹跟随转动角度”的核心逻辑：
+    // 输入：缓存的 Ego-Planner nav_msgs/Path + 当前底盘 odom；
+    // 输出：gimbal_big_yaw_angle_，即准备发给下位机的大云台目标 yaw。
+    // 注意这里不直接写串口，串口发送统一在 txLoop() 中完成。
     rclcpp::Time path_time;
     {
         std::lock_guard<std::mutex> lk(path_mtx_);
         path_time = last_path_time_;
     }
+    // 轨迹过期时不更新目标角，避免 Ego-Planner 停止发布后继续根据旧轨迹转动大云台。
+    // txLoop() 会继续发送最后一次有效角度，相当于“冻结”而不是突然回零。
     if ((this->now() - path_time).seconds() * 1000.0 > gimbal_path_timeout_ms_) return;
 
     nav_msgs::msg::Path local_path;
     {
         std::lock_guard<std::mutex> lk(path_mtx_);
         if (cached_path_.poses.empty()) return;
+        // 拷贝一份 Ego 局部轨迹后释放锁，避免后续较长的几何计算阻塞轨迹订阅回调。
         local_path = cached_path_;
     }
 
     double chassis_x, chassis_y, chassis_yaw;
+    // 获取底盘在 map 坐标系下的位姿。Ego 局部轨迹点默认按 map 表达，因此下面所有距离、
+    // 插值和 yaw 目标都在 map 坐标系内计算。
     if (!getChassisPoseInMap(chassis_x, chassis_y, chassis_yaw)) return;
 
-    // --- Speed-dependent lookahead ---
+    // --- 速度自适应前瞻距离 ---
+    // odom 中的线速度通常是底盘坐标系速度，这里先读取缓存值，再换算出平面速度大小。
     double vx, vy;
     {
         std::lock_guard<std::mutex> lk(odom_mtx_);
         vx = cached_odom_vx_;
         vy = cached_odom_vy_;
     }
-    // Transform velocity to map frame for true speed
+    // 将车体系速度旋转到 map 系后求模。对速度大小来说旋转前后模长相同，
+    // 但保留这个写法可以明确表达：路径前瞻基于 map 中真实运动速度。
     double speed = std::hypot(
         vx * std::cos(chassis_yaw) - vy * std::sin(chassis_yaw),
         vx * std::sin(chassis_yaw) + vy * std::cos(chassis_yaw));
+    // 前瞻距离越大，gimbal_big 会更早对准路径远处的方向；前瞻太小则容易抖动，
+    // 太大则在急弯处可能提前过多。参数在 serial.yaml 中按实车调。
     double lookahead = gimbal_lookahead_base_ + gimbal_lookahead_k_ * speed;
 
-    // --- Step 1: Find nearest path point (search from prev_nearest_idx_) ---
+    // --- Step 1: 在 Ego 局部轨迹上寻找距离当前底盘最近的点 ---
+    // nearest_idx 是轨迹弧长前瞻的起点，不是最终目标点。
     const size_t N = local_path.poses.size();
     size_t nearest_idx = 0;
     double min_dist = std::numeric_limits<double>::max();
 
-    // Warm-start from previous nearest to handle forward motion efficiently
+    // 使用上一帧最近点 prev_nearest_idx_ 作为 warm-start：
+    // 导航过程中机器人通常沿 Ego 局部轨迹向前运动，最近点索引也大多单调向前，
+    // 从上一帧附近开始搜索可以减少全路径遍历带来的计算量。
     size_t search_start = (prev_nearest_idx_ > 0 && prev_nearest_idx_ < N)
                               ? prev_nearest_idx_ - 1 : 0;
     for (size_t i = search_start; i < N; ++i) {
+        // 只比较平方距离，避免每个点都开方；最近点排序结果不受影响。
         double dx = local_path.poses[i].pose.position.x - chassis_x;
         double dy = local_path.poses[i].pose.position.y - chassis_y;
         double d = dx * dx + dy * dy;
@@ -269,19 +318,27 @@ void Node::updateGimbalFromCachedPath()
             min_dist = d;
             nearest_idx = i;
         }
-        // If distance starts growing and we've passed the minimum, stop early
+        // 距离已经明显变大且越过当前最近点后提前退出。
+        // 这依赖轨迹点顺序连续，适合 Ego/导航路径，不适合无序点集。
         if (d > min_dist + 1.0 && i > nearest_idx + 1) break;
     }
+    // 保存本轮最近点，下一轮定时器继续从附近搜索。
     prev_nearest_idx_ = nearest_idx;
 
-    // --- Step 2: Walk along path arc-length from nearest_idx ---
-    // Find the point that is `lookahead` meters ahead on the path
+    // --- Step 2: 从最近点开始沿 Ego 局部轨迹弧长向前走 lookahead 米 ---
+    // 这里沿轨迹累计段长，而不是直接找欧氏距离 lookahead 的点。
+    // 这样在弯道上得到的是“沿 Ego 避障后轨迹前方”的点，更符合下位机转向语义。
     double accumulated = 0.0;
     size_t target_idx = nearest_idx;
     double target_x = local_path.poses[nearest_idx].pose.position.x;
     double target_y = local_path.poses[nearest_idx].pose.position.y;
     double target_yaw_in_map = 0.0;
 
+    // 提取 Ego 局部轨迹点姿态中的 yaw。
+    // 下位机最终真正使用的就是这个 yaw：txLoop() 会把它写入 gimbal_big.yaw_angle。
+    // ego_planner 发布 visual_local_trajectory 时，pose.orientation 已经由相邻轨迹点
+    // 的切线方向计算得到，因此这里不再从 position 差分重新推 yaw，避免与上游轨迹
+    // 发布端的方向定义打架。
     auto extractYaw = [](const geometry_msgs::msg::Quaternion& q) -> double {
         tf2::Quaternion quat(q.x, q.y, q.z, q.w);
         double r, p, y;
@@ -297,11 +354,15 @@ void Node::updateGimbalFromCachedPath()
         double seg_len = std::hypot(x1 - x0, y1 - y0);
 
         if (accumulated + seg_len >= lookahead) {
-            // Interpolate position within this segment
+            // 前瞻距离落在当前线段内部时，对位置做线性插值。
+            // 这个插值位置主要用于 RViz 可视化；目标 yaw 仍取前方 Ego 轨迹点的 orientation。
             double frac = (lookahead - accumulated) / seg_len;
             target_x = x0 + frac * (x1 - x0);
             target_y = y0 + frac * (y1 - y0);
-            // Use only the forward point's orientation (avoid corrupted near-car yaw)
+            // 目标角使用前方点 i+1 的 yaw，而不是最近点或插值切线方向：
+            // 1. 最近点姿态可能受车身附近轨迹刷新影响而不稳定；
+            // 2. Ego-Planner 已经在 Path.pose.orientation 中给出了避障后局部轨迹方向；
+            // 3. 对 gimbal_big 来说，我们希望它提前转到局部轨迹前方的目标方向。
             target_yaw_in_map = extractYaw(local_path.poses[i + 1].pose.orientation);
             target_idx = i + 1;
             break;
@@ -310,18 +371,24 @@ void Node::updateGimbalFromCachedPath()
         target_idx = i + 1;
     }
 
-    // If we ran out of path before reaching lookahead, use last point
+    // 如果剩余轨迹长度不足 lookahead，则使用局部轨迹终点作为目标。
+    // 这通常发生在接近目标点时，此时继续沿用最后一个路径点 yaw，避免目标角丢失。
     if (accumulated < lookahead && target_idx >= N - 1) {
         target_x = local_path.poses.back().pose.position.x;
         target_y = local_path.poses.back().pose.position.y;
-        target_yaw_in_map = extractYaw(local_path.poses.back().pose.orientation); // 这里反而需要直接使用这个角度，全局规划器给出的方向是在 哨兵坐标系下的 ，可以直接用
+        // 这里直接使用 Ego 局部轨迹终点 yaw。
+        // 对哨兵导航来说，Ego 输出的方向已经是希望大云台/车体到达该局部轨迹点时保持的方向，
+        // 因此不再用“当前位置指向终点”的 atan2 重新计算。
+        target_yaw_in_map = extractYaw(local_path.poses.back().pose.orientation);
         // target_yaw_in_map = std::atan2(
         // std::sin(target_yaw_in_map + M_PI),
         // std::cos(target_yaw_in_map + M_PI)); // 为了mid360朝前，增加pi
     }
 
 
-    // --- Step 4: Low-pass filter with angle wrapping ---
+    // --- Step 3: 对目标 yaw 做跨 pi 边界处理和低通滤波 ---
+    // yaw 是周期角，不能直接 target - prev，否则从 +179 度到 -179 度会被误认为跳了 -358 度。
+    // 先把角度误差规约到 [-pi, pi]，再按 alpha 做一阶低通，保证大云台目标角连续。
     {
         float prev = gimbal_yaw_filtered_;
         float diff = target_yaw_in_map - prev;
@@ -330,7 +397,10 @@ void Node::updateGimbalFromCachedPath()
         float filtered = prev + static_cast<float>(gimbal_yaw_smooth_alpha_) * diff;
 
         std::lock_guard<std::mutex> lk(tx_mtx_);
+        // gimbal_yaw_filtered_ 保存未强制规约的连续滤波角，用于下一帧继续平滑。
         gimbal_yaw_filtered_ = filtered;
+        // gimbal_big_yaw_angle_ 是最终给 txLoop() 使用的路径跟随角，规约到 [-pi, pi]。
+        // txLoop() 会在此基础上叠加 gimbal_big 漂移预测，再写入串口包。
         gimbal_big_yaw_angle_ = std::atan2(std::sin(filtered), std::cos(filtered));
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
@@ -339,10 +409,12 @@ void Node::updateGimbalFromCachedPath()
             "角度 %f",
             gimbal_big_yaw_angle_
         );
+        // 更新时间戳，用于 txLoop() 判断路径角是否还有效。
         last_gimbal_angle_update_ = this->now();
     }
 
-    // --- Visualization: lookahead point (green sphere in map frame) ---
+    // --- RViz 可视化：前瞻点（map 坐标系绿色球） ---
+    // 用于检查当前 gimbal_big 目标角到底取自路径上哪个前方位置。
     {
         visualization_msgs::msg::Marker m;
         m.header.stamp = this->now();
@@ -366,7 +438,8 @@ void Node::updateGimbalFromCachedPath()
         lookahead_point_marker_pub_->publish(m);
     }
 
-    // --- Visualization: expected yaw (red arrow in gimbal_big frame) ---
+    // --- RViz 可视化：期望 yaw（gimbal_big 坐标系红色箭头） ---
+    // 该箭头显示滤波后的目标方向，方便和真实大云台方向、路径方向进行对比。
     {
         visualization_msgs::msg::Marker marker;
         marker.header.stamp = this->now();
@@ -1208,13 +1281,24 @@ void Node::txLoop()
                 pkt.time_stamp = nowMs();
                 pkt.data.speed_vector = current_cmd_state_.data.speed_vector;
 
+                // gimbal_big 路径跟随角有效性判断：
+                // updateGimbalFromCachedPath() 每 20ms 刷新 last_gimbal_angle_update_。
+                // 如果超过 gimbal_angle_timeout_ms_ 没有新角度，说明路径/odom 可能过期，
+                // 此时不再更新角度预测，只继续发送最后一次有效状态，避免下位机收到突变角。
                 double angle_age_ms = (this->now() - last_gimbal_angle_update_).seconds() * 1000.0;
                 bool angle_valid = (angle_age_ms < gimbal_angle_timeout_ms_);
 
                 if (angle_valid) {
+                    // gimbal_big_yaw_angle_ 是导航路径给出的期望角。
+                    // gimbal_big_drift_ 是根据 IMU 与 odom 差值估算出来的大云台零位/IMU 漂移补偿。
+                    // 因为 txLoop() 发送频率高于 drift_timer_ 更新频率，这里用漂移速率做一次短时预测，
+                    // 让发给下位机的位置控制角更接近当前时刻。
                     double dt_since = (this->now() - last_drift_update_).seconds();
                     double predicted_drift = gimbal_big_drift_ + gimbal_big_drift_rate_ * dt_since;
                     gimbal_big_yaw_angle_state_ = gimbal_big_yaw_angle_ + predicted_drift;
+                    // 最终写入串口包的 gimbal_big.yaw_angle：
+                    // 路径跟随目标角 + 大云台漂移预测补偿，单位 rad。
+                    // 下位机按该角度做 gimbal_big 位置控制。
                     pkt.data.gimbal_big.yaw_angle = gimbal_big_yaw_angle_state_;
                         RCLCPP_DEBUG_THROTTLE(
                         this->get_logger(),
@@ -1223,9 +1307,12 @@ void Node::txLoop()
                         "发布角度%f",
                         pkt.data.gimbal_big.yaw_angle
                     );
+                    // 当前路径跟随使用位置控制，角速度字段固定为 0，避免与 yaw_angle 同时竞争控制权。
                     pkt.data.gimbal_big.yaw_vel = 0.0f;
                 } else {
-                    pkt.data.gimbal_big.yaw_angle = gimbal_big_yaw_angle_state_;  // 角度过期，继续发布预测的角度，但不再更新预测值（相当于冻结在最后一个有效角度）。去除了速度控制
+                    // 角度过期：继续发布上一轮有效的 gimbal_big_yaw_angle_state_。
+                    // 这样下位机保持最后目标角，不因为上位机暂时没有路径/odom 数据而乱转。
+                    pkt.data.gimbal_big.yaw_angle = gimbal_big_yaw_angle_state_;
                     pkt.data.gimbal_big.yaw_vel = 0.0f;
                 }
 
@@ -1272,6 +1359,8 @@ double Node::calculateDecayedConfidence(double current_confidence, double dt) {
 void Node::onOdom(const nav_msgs::msg::Odometry& msg)
 {
     std::lock_guard<std::mutex> lk(odom_mtx_);
+    // 缓存底盘位姿，供 updateGimbalFromCachedPath() 在 50Hz 定时器中读取。
+    // 路径点在 map/odom 平面内表达，因此这里至少需要 x、y、yaw 三个自由度。
     cached_odom_x_ = msg.pose.pose.position.x;
     cached_odom_y_ = msg.pose.pose.position.y;
 
@@ -1283,6 +1372,8 @@ void Node::onOdom(const nav_msgs::msg::Odometry& msg)
     double roll, pitch;
     tf2::Matrix3x3(q).getRPY(roll, pitch, cached_odom_yaw_);
 
+    // 缓存底盘线速度，用于计算速度自适应前瞻距离。
+    // 前瞻距离越大，gimbal_big 目标角越偏向路径远端，适合高速行驶。
     cached_odom_vx_ = msg.twist.twist.linear.x;
     cached_odom_vy_ = msg.twist.twist.linear.y;
     last_odom_time_ = this->now();
@@ -1300,8 +1391,10 @@ void Node::onOdom(const nav_msgs::msg::Odometry& msg)
 bool Node::getChassisPoseInMap(double& x, double& y, double& yaw)
 {
     std::lock_guard<std::mutex> lk(odom_mtx_);
+    // odom 超时则拒绝更新路径跟随角，避免使用旧位姿在路径上找前瞻点。
     if ((this->now() - last_odom_time_).seconds() * 1000.0 > odom_timeout_ms_) return false;
 
+    // 默认认为 odom_topic_ 已经和路径处在同一全局坐标系中。
     x = cached_odom_x_;
     y = cached_odom_y_;
     yaw = cached_odom_yaw_;
@@ -1310,12 +1403,15 @@ bool Node::getChassisPoseInMap(double& x, double& y, double& yaw)
         std::lock_guard<std::mutex> lk2(map_odom_mtx_);
         if (!has_cached_map_to_odom_) return false;
 
+        // 重定位模式下，里程计位姿先在 odom 系下给出，而路径在 map 系下给出。
+        // 因此这里使用缓存的 map->odom 变换，把底盘位置转换到 map 后再参与路径前瞻计算。
         double cy = std::cos(cached_map_to_odom_yaw_);
         double sy = std::sin(cached_map_to_odom_yaw_);
         double rx = x * cy - y * sy;
         double ry = x * sy + y * cy;
         x = rx + cached_map_to_odom_x_;
         y = ry + cached_map_to_odom_y_;
+        // 这里沿用 map->odom 的 yaw 作为全局朝向补偿项，供速度换算和后续路径角计算使用。
         yaw = cached_map_to_odom_yaw_;
     }
     return true;
@@ -1325,6 +1421,8 @@ void Node::updateMapToOdom()
 {
     if (!tf_buffer_) return;
     try {
+        // 重定位模式辅助逻辑：周期性缓存 map->odom。
+        // updateGimbalFromCachedPath() 不直接查 TF，避免在路径角计算线程里阻塞。
         auto tf = tf_buffer_->lookupTransform("map", "odom", tf2::TimePointZero);
         std::lock_guard<std::mutex> lk(map_odom_mtx_);
         cached_map_to_odom_x_ = tf.transform.translation.x;

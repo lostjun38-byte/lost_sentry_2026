@@ -11,5 +11,10 @@ rm_sentry_pp_nocrc_serial:
     gimbal_lookahead_base: 0.3
     gimbal_follow_lookahead: 0.4
     gimbal_lookahead_k: 1.0
-    gimbal_yaw_smooth_alpha: 0.1  # 0=非常平滑/迟缓，1=无滤波
+    gimbal_yaw_smooth_alpha: 0.01  # 0=非常平滑/迟缓，1=无滤波
+    # 大云台路径跟随使用 Ego-Planner 优化后的局部轨迹，而不是 Nav2 原始全局 /path。
+    # 下位机最终只使用路径点 orientation 中的 yaw 作为目标转向角，因此这里订阅
+    # ego_planner 发布的 visual_local_trajectory：该 Path 的每个 pose.orientation 已由
+    # Ego 局部轨迹相邻点切线方向计算，能反映避障/局部重规划后的实际行进方向。
+    gimbal_follow_path_topic: visual_local_trajectory
     robot_area_name: bumpy_area

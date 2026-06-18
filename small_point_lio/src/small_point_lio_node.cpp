@@ -88,12 +88,12 @@ namespace small_point_lio {
             odometry_msg.pose.pose.orientation.w = transform_stamped.transform.rotation.w;
 
             // TODO it is lidar_odom->lidar_frame_fake, we need to transform it to odom_fake->base_link_fake
-            // odometry_msg.twist.twist.linear.x = odometry.velocity.x();
-            // odometry_msg.twist.twist.linear.y = odometry.velocity.y();
-            // odometry_msg.twist.twist.linear.z = odometry.velocity.z();
-            // odometry_msg.twist.twist.angular.x = odometry.angular_velocity.x();
-            // odometry_msg.twist.twist.angular.y = odometry.angular_velocity.y();
-            // odometry_msg.twist.twist.angular.z = odometry.angular_velocity.z();
+            odometry_msg.twist.twist.linear.x = odometry.velocity.x();
+            odometry_msg.twist.twist.linear.y = odometry.velocity.y();
+            odometry_msg.twist.twist.linear.z = odometry.velocity.z();
+            odometry_msg.twist.twist.angular.x = odometry.angular_velocity.x();
+            odometry_msg.twist.twist.angular.y = odometry.angular_velocity.y();
+            odometry_msg.twist.twist.angular.z = odometry.angular_velocity.z();
 
             tf_broadcaster->sendTransform(transform_stamped);
             odometry_publisher->publish(odometry_msg);

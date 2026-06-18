@@ -5,7 +5,8 @@
     # Basic behavior
     auto_plan: true
     frame_id: "map"
-    map_topic: "/global_costmap/costmap_raw"
+    map_topic: "/global_costmap/costmap"
+    occupied_cost_threshold: 50
 
     # Ego trajectory generation
     local_planning_horizon: 5.0
@@ -16,12 +17,12 @@
 
     # Robot dynamic limits
     max_vel: 1.5
-    max_acc: 3.0
+    max_acc: 1.8
     max_jerk: 4.0
 
     # Nav2 path lifecycle and dynamic-obstacle replanning
     input_path_timeout: 3.0
-    replan_cooldown: 0.2
+    replan_cooldown: 0.5
     trajectory_collision_check_time: 1.5
     trajectory_collision_check_dt: 0.1
     trajectory_collision_check_distance: 3.0

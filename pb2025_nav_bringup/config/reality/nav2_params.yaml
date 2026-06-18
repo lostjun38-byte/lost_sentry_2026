@@ -84,8 +84,8 @@ small_point_lio:
 #     runtime_pos_log_enable: False                       # Option: True
 
 #     common:
-#       lid_topic: "velodyne_points"
-#       # lid_topic: "livox/lidar"
+#       # lid_topic: "velodyne_points"
+#       lid_topic: "livox/lidar"
 #       imu_topic: "livox/imu"
 #       con_frame: False                                  # True: if you need to combine several LiDAR frames into one
 #       con_frame_num: 1                                  # the number of frames combined
@@ -100,19 +100,19 @@ small_point_lio:
 #       init_pose: [ 0.0, 0.0, 0.0 ]
 
 #     preprocess:
-#       lidar_type: 2                                     # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR
-#       scan_line: 32
-#       timestamp_unit: 2                                 # the unit of time/t field in the PointCloud2 rostopic: 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
+#       lidar_type: 1                                     # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR
+#       scan_line: 4
+#       timestamp_unit: 3                                 # the unit of time/t field in the PointCloud2 rostopic: 0-second, 1-milisecond, 2-microsecond, 3-nanosecond.
 #       blind: 0.5
 
 #     mapping:
-#       imu_en: True
+#       imu_en: true
 #       extrinsic_est_en: False                           # for aggressive motion, set this variable False
 #       imu_time_inte: 0.005                              # = 1 / frequency of IMU
 #       lidar_time_inte: 0.1
 #       satu_acc: 30.0                                    # the saturation value of IMU's acceleration. not related to the units
 #       satu_gyro: 35.0                                   # the saturation value of IMU's angular velocity. not related to the units
-#       acc_norm: 9.81                                    # 1.0 for g as unit, 9.81 for m/s^2 as unit of the IMU's acceleration
+#       acc_norm: 0.997306                                    # 1.0 for g as unit, 9.81 for m/s^2 as unit of the IMU's acceleration
 #       lidar_meas_cov: 0.001                             # 0.001
 #       acc_cov_output: 500.0
 #       gyr_cov_output: 1000.0
@@ -125,9 +125,9 @@ small_point_lio:
 #       plane_thr: 0.1                                    # 0.05, the threshold for plane criteria, the smaller, the flatter a plane
 #       match_s: 81.0
 #       ivox_grid_resolution: 0.5
-#       gravity: [ 0.0, -4.9, -8.487047153776548 ]        # gravity to be aligned # rpy = [0, pi/6, 0]
-#       gravity_init: [ 0.0, -4.9, -8.487047153776548 ]   # preknown gravity in the first IMU body frame, use when imu_en is False or start from a non-stationary state
-#       extrinsic_T: [ 0.0, 0.0, 0.0 ]
+#       gravity: [7.931857, 0.093905, -5.726697]        # gravity to be aligned # rpy = [0, pi/6, 0]
+#       gravity_init: [7.931857, 0.093905, -5.726697]   # preknown gravity in the first IMU body frame, use when imu_en is False or start from a non-stationary state
+#       extrinsic_T: [-0.011, -0.02329, 0.04412]
 #       extrinsic_R: [ 1.0, 0.0, 0.0,
 #                      0.0, 1.0, 0.0,
 #                      0.0, 0.0, 1.0 ]
@@ -160,7 +160,7 @@ sensor_scan_generation:
     use_sim_time: False
     lidar_frame: "front_mid360"
     base_frame: "base_footprint"
-    robot_base_frame: "gimbal_yaw"
+    robot_base_frame: "gimbal_yaw_fake"
 
 terrain_analysis:
   ros__parameters:
@@ -224,7 +224,7 @@ fake_vel_transform:
   ros__parameters:
     use_sim_time: False
     odom_topic: "odometry"
-    robot_base_frame: "gimbal_yaw"
+    robot_base_frame: "gimbal_big"
     fake_robot_base_frame: "gimbal_yaw_fake"
     local_plan_topic: "transformed_global_plan"
     input_cmd_vel_topic: "cmd_vel_nav2_result"
@@ -243,7 +243,7 @@ small_gicp_relocalization:
     map_frame: "map"
     odom_frame: "odom"
     base_frame: "base_footprint"
-    robot_base_frame: "gimbal_yaw"
+    robot_base_frame: "gimbal_big"
     lidar_frame: "front_mid360"
     init_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # [x, y, z, roll, pitch, yaw]
     # The prior_pcd_file does not need to be specified since it going to be set by defaults in launch.
@@ -404,7 +404,7 @@ controller_server:
   ros__parameters:
     use_sim_time: False
     odom_topic: odometry
-    controller_frequency: 50.0
+    controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001 #0.5
     min_theta_velocity_threshold: 0.001
@@ -421,6 +421,37 @@ controller_server:
       plugin: "nav2_controller::SimpleGoalChecker"
       xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 6.28
+    # FollowPath:
+    #   plugin: "pb_omni_pid_pursuit_controller::OmniPidPursuitController"
+    #   translation_kp: 3.0
+    #   translation_ki: 0.1
+    #   translation_kd: 0.3
+    #   enable_rotation: false
+    #   rotation_kp: 3.0
+    #   rotation_ki: 0.1
+    #   rotation_kd: 0.3
+    #   transform_tolerance: 0.1
+    #   min_max_sum_error: 1.0
+    #   lookahead_dist: 2.0
+    #   use_velocity_scaled_lookahead_dist: true
+    #   lookahead_time: 1.0
+    #   min_lookahead_dist: 0.5
+    #   max_lookahead_dist: 1.0
+    #   use_interpolation: false
+    #   use_rotate_to_heading: false
+    #   use_rotate_to_heading_treshold: 0.1
+    #   min_approach_linear_velocity: 0.5
+    #   approach_velocity_scaling_dist: 1.0
+    #   v_linear_min: -1.5
+    #   v_linear_max: 1.5
+    #   v_angular_min: -2.0
+    #   v_angular_max: 2.0
+    #   curvature_min: 0.4                                # 低曲率阈值，低于此值不减速。
+    #   curvature_max: 0.7                                # 高曲率阈值，高于此值大幅减速。
+    #   reduction_ratio_at_high_curvature: 0.5            # 高曲率时的速度降低比例。 0.5 (即减速 50%)
+    #   curvature_forward_dist: 0.7                       # 前向距离，用于曲率计算
+    #   curvature_backward_dist: 0.3                      # 后向距离，用于曲率计算
+    #   max_velocity_scaling_factor_rate: 0.9             # 速度缩放因子的最大变化率
     FollowPath:    
       plugin: "nav2_mppi_ego_controller::MPPIController"
       #param 
@@ -444,7 +475,7 @@ controller_server:
       temperature: 0.3 # 0 mean use control with best cost, huge value will lead to just taking mean of all trajectories without cost consideration.
       gamma: 0.07 # A trade-off between smoothness (high) and low energy (low). This is a complex parameter that likely won’t need to be changed from the default.
       motion_model: "Omni"
-      visualize: false # set to true to visualize the trajectories, but it will slow down the computation by a lot
+      visualize: true # set to true to visualize the trajectories, but it will slow down the computation by a lot
       reset_period: 1.0 # Required time of inactivity to reset optimizer (only in Humble
       regenerate_noises: false
       retry_attempt_limit: 3 # Number of attempts to find feasible trajectory on failure for soft-resets before reporting total failure.
@@ -569,8 +600,7 @@ local_costmap:
       width: 16
       height: 16
       resolution: 0.05
-      robot_radius: 0.3
-      footprint: "[ [0.1, 0.1], [0.1, -0.1], [-0.1, -0.1], [-0.1, 0.1] ]"
+      robot_radius: 0.2
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"] 
       intensity_voxel_layer:
         plugin: pb_nav2_costmap_2d::IntensityVoxelLayer
@@ -599,54 +629,13 @@ local_costmap:
           max_obstacle_height: 0.25
           obstacle_max_range: 8.0
           obstacle_min_range: 0.5
-      # stvl_voxel_layer:
-      #   plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
-      #   enabled: true
-      #   voxel_decay: 2.0     #seconds if linear, e^n if exponential
-      #   decay_model: 0      #0=linear, 1=exponential, 2=persistent
-      #   voxel_size: 0.05   #meters
-      #   track_unknown_space: true   #default space is unknown
-      #   observation_persistence: 0.0  #seconds
-      #   max_obstacle_height: 2.0    #meters
-      #   mark_threshold: 0      #voxel height
-      #   update_footprint_enabled: true
-      #   combination_method: 1      #1=max, 0=override
-      #   obstacle_range: 5.0    #meters
-      #   origin_z: 0.0    #meters
-      #   publish_voxel_map: false   # default off
-      #   transform_tolerance: 0.2    # seconds
-      #   mapping_mode: false  # default off, saves map not for navigation
-      #   map_save_duration: 60.0     #default 60s, how often to autosave
-      #   observation_sources: livox_source 
-      #   livox_source:
-      #     data_type: PointCloud2
-      #     topic: "/red_standard_robot1/livox/lidar_filtered"
-      #     transport_type: "raw"        #default raw -No compression-, Options: zlib, draco, zstd
-      #     marking: true
-      #     clearing: true
-
-      #     obstacle_range: 5.0
-      #     raytrace_range: 6.0
-
-      #     min_obstacle_height: 0.15     #default 0, meters
-      #     max_obstacle_height: 2.0     #defaule 3, meters
-      #     expected_update_rate: 0.0    #default 0, if not updating at this rate at least, remove from buffer
-      #     observation_persistence: 0.0 #default 0, use all measurements taken during now-value, 0=latest
-      #     inf_is_valid: false          #default false, for laser scans
-      #     clear_after_reading: true    #default false, clear the buffer after the layer gets readings from it
-      #     filter: "voxel"              #default passthrough, apply "voxel", "passthrough", or no filter to sensor data, recommended to have at one filter on
-      #     voxel_min_points: 0          #default 0, minimum points per voxel for voxel filter
-      #     model_type: 1
-      #     vertical_fov_angle: 1.03      #default 0.7, radians
-      #     vertical_fov_offset: 0.0
-      #     horizontal_fov_angle: 6.28
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 1.0
-        inflation_radius: 0.52
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
       always_send_full_costmap: False
 
 global_costmap:
@@ -657,7 +646,7 @@ global_costmap:
       publish_frequency: 5.0
       global_frame: map
       robot_base_frame: gimbal_yaw_fake
-      robot_radius: 0.3
+      robot_radius: 0.2
       resolution: 0.05
       plugins: ["static_layer", "intensity_voxel_layer", "inflation_layer"]
       intensity_voxel_layer:
@@ -692,8 +681,8 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.6
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
       always_send_full_costmap: False
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.
@@ -722,6 +711,38 @@ planner_server:
       w_euc_cost: 1.0
       w_traversal_cost: 12.0
       w_heuristic_cost: 1.0
+    # GridBased:
+    #   plugin: "nav2_smac_planner/SmacPlannerHybrid"
+    #   tolerance: 0.5                      # 如果无法到达精确位置的规划容差，单位：米
+    #   allow_unknown: true                 # 允许在未知空间中行驶
+    #   downsample_costmap: false           # 是否对地图进行下采样
+    #   downsampling_factor: 1              # 代价地图层分辨率的倍数 (e.g. 2 on a 5cm costmap would be 10cm)
+    #   max_iterations: 1000000             # 搜索的最大总迭代次数（如果无法到达），设置为-1以禁用
+    #   max_on_approach_iterations: 1000    # 一旦在容差范围内，尝试到达目标的最大迭代次数
+    #   max_planning_time: 3.5              # 规划、平滑和上采样的最大时间（秒）。将根据规划后的剩余时间缩放最大平滑和上采样时间。
+    #   cost_travel_multiplier: 2.0         # For 2D: 应用于搜索的代价乘数，以避开高代价区域。较大的值将更精确地放置在通道的中心（如果存在非“FREE”代价势场），但计算时间稍长。为了优化速度，1.0是合理的值。合理的折衷值是2.0。0.0的值有效地禁用避开障碍物的功能，像一个简单的二进制搜索A*。
+    #   motion_model_for_search: "DUBIN"    # For Hybrid Dubin, Redds-Shepp
+    #   angle_quantization_bins: 64         # For Hybrid nodes: 搜索的角度桶数，对于2D节点必须为1（无角度搜索）
+    #   analytic_expansion_ratio: 3.5       # For Hybrid/Lattice nodes: 在搜索过程中尝试解析扩展的比例，用于最终接近。
+    #   analytic_expansion_max_length: 3.0  # For Hybrid/Lattice nodes: 解析扩展被认为有效的最大长度，以防止不安全的捷径（单位：米）。这应该与最小转弯半径成比例，不应小于最小半径的4-5倍。
+    #   minimum_turning_radius: 0.05        # For Hybrid/Lattice nodes: 路径/车辆的最小转弯半径，单位：米
+    #   retrospective_penalty: 0.025        # For Hybrid/Lattice nodes: 优先考虑路径上较晚的机动而不是较早的机动。节省搜索时间，因为较早的节点不会被扩展，直到有必要。必须 >= 0.0且 <= 1.0
+    #   reverse_penalty: 1.0                # For Reeds-Shepp model: 应用于倒车的惩罚，必须 >= 1
+    #   change_penalty: 0.0                 # For Hybrid nodes: 应用于改变方向的惩罚，必须 >= 0
+    #   non_straight_penalty: 1.20          # For Hybrid nodes: 应用于非直线运动的惩罚，必须 >= 1
+    #   cost_penalty: 2.0                   # For Hybrid nodes: 在将更高代价区域添加到障碍物地图动态规划距离扩展启发式时应用的惩罚。这将驱动机器人更靠近通道的中心。1.3 - 3.5 之间的值是合理的。
+    #   rotation_penalty: 5.0               # For Lattice node: 仅在使用包含原地旋转原语的最小控制集时应用于纯原地旋转命令的惩罚。除非严格必要用于避开障碍物，否则应始终设置足够高的权重，以避免此操作，否则可能会在路径中频繁出现不连续的情况，要求机器人原地旋转以节省路径距离。
+    #   lookup_table_size: 20.0             # For Hybrid nodes: 缓存的dubin/reeds-sheep距离窗口的大小，单位：米。
+    #   cache_obstacle_heuristic: True      # For Hybrid nodes: 在同一目标位置的后续重新规划之间缓存障碍物地图动态规划距离扩展启发式。如果代价地图基本静态，则显著加快重新规划性能（40倍）。
+    #   allow_reverse_expansion: False      # For Lattice node: 是否在前向原语或反向扩展状态格子图中扩展，将使每一步的分支因子加倍。
+    #   smooth_path: True                   # For Lattice/Hybrid nodes: 是否平滑路径，对于2D节点始终为 true。
+    #   smoother:
+    #     max_iterations: 1000
+    #     w_smooth: 0.3
+    #     w_data: 0.2
+    #     tolerance: 1.0e-10
+    #     do_refinement: true
+
 
 # smoother_server:
 #   ros__parameters:

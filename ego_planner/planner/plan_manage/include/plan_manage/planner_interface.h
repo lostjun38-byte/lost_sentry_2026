@@ -91,8 +91,13 @@ namespace  ego_planner
             void initParam(double max_vel,double max_acc,double max_jerk);
 
             void initEsdfMap(double x_size,double y_size,double z_size,double resolution, Eigen::Vector3d org,double inflate_values);
-            void setOccupancyGridMap(const nav_msgs::msg::OccupancyGrid& costmap, double inflate_values);
-            void setNav2InflatedOccupancyGridMap(const nav_msgs::msg::OccupancyGrid& costmap);
+            void setOccupancyGridMap(
+                const nav_msgs::msg::OccupancyGrid& costmap,
+                double inflate_values,
+                int occupied_cost_threshold = 50);
+            void setNav2InflatedOccupancyGridMap(
+                const nav_msgs::msg::OccupancyGrid& costmap,
+                int occupied_cost_threshold = 50);
 
             void setPathPoint(std::vector<PathPoint> &plan_traj);
 

@@ -49,6 +49,7 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     this->declare_parameter("trajectory_collision_check_distance", trajectory_collision_check_distance_);
     this->declare_parameter("fallback_trajectory_max_age", fallback_trajectory_max_age_);
     this->declare_parameter("make_plan_warn_time_ms", make_plan_warn_time_ms_);
+    this->declare_parameter("occupied_cost_threshold", occupied_cost_threshold_);
     this->get_parameter("auto_plan", auto_plan_);
     this->get_parameter("frame_id", frame_id_);
     this->get_parameter("map_topic", map_topic_);
@@ -67,6 +68,7 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
     this->get_parameter("trajectory_collision_check_distance", trajectory_collision_check_distance_);
     this->get_parameter("fallback_trajectory_max_age", fallback_trajectory_max_age_);
     this->get_parameter("make_plan_warn_time_ms", make_plan_warn_time_ms_);
+    this->get_parameter("occupied_cost_threshold", occupied_cost_threshold_);
     local_planning_horizon_ = std::max(local_planning_horizon_, 0.0);
     max_vel_ = std::max(max_vel_, 1e-3);
     max_acc_ = std::max(max_acc_, 1e-3);
@@ -188,14 +190,15 @@ TrajectoryAndObstaclesPublisher::TrajectoryAndObstaclesPublisher()
         this->get_logger(),
         "8. Ego动态重规划参数: local_horizon=%.3f, input_path_timeout=%.3f, "
         "replan_cooldown=%.3f, collision_check_time=%.3f, collision_check_dt=%.3f, "
-        "collision_check_distance=%.3f, fallback_trajectory_max_age=%.3f",
+        "collision_check_distance=%.3f, fallback_trajectory_max_age=%.3f, occupied_cost_threshold=%d",
         local_planning_horizon_,
         input_path_timeout_,
         replan_cooldown_,
         trajectory_collision_check_time_,
         trajectory_collision_check_dt_,
         trajectory_collision_check_distance_,
-        fallback_trajectory_max_age_);
+        fallback_trajectory_max_age_,
+        occupied_cost_threshold_);
     RCLCPP_INFO(this->get_logger(), "=== RViz2设置步骤 ===");
     RCLCPP_INFO(this->get_logger(), "1. 添加Grid显示");
     RCLCPP_INFO(this->get_logger(), "2. 添加2D Nav Goal工具（话题：/goal_pose）");
@@ -453,7 +456,7 @@ void TrajectoryAndObstaclesPublisher::costmap_callback(const nav_msgs::msg::Occu
     //       但不会和 data_mutex_ 互锁。
     {
         std::lock_guard<std::mutex> plock(planner_mutex_);
-        ego_planner_->setNav2InflatedOccupancyGridMap(*msg);
+        ego_planner_->setNav2InflatedOccupancyGridMap(*msg, occupied_cost_threshold_);
     }
 }
 

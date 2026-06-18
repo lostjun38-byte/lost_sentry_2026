@@ -28,6 +28,49 @@ namespace ego_planner
             return Eigen::Vector3d(1.0, 0.0, 0.0);
         }
 
+        vector<Eigen::Vector3d> buildFallbackPointSetFromAStar(
+            const vector<Eigen::Vector2d> & a_star_path,
+            const Eigen::Vector3d & start_pt,
+            const Eigen::Vector3d & local_target_pt,
+            double sample_interval)
+        {
+            vector<Eigen::Vector3d> point_set;
+            point_set.push_back(start_pt);
+
+            Eigen::Vector2d last_added = start_pt.head<2>();
+            const double min_interval = std::max(sample_interval, 1e-3);
+            for (const auto & point : a_star_path) {
+                if ((point - start_pt.head<2>()).norm() < min_interval * 0.5 ||
+                    (point - local_target_pt.head<2>()).norm() < min_interval * 0.5)
+                {
+                    continue;
+                }
+
+                if ((point - last_added).norm() < min_interval) {
+                    continue;
+                }
+
+                point_set.emplace_back(point.x(), point.y(), 0.2);
+                last_added = point;
+            }
+
+            if ((local_target_pt.head<2>() - point_set.back().head<2>()).norm() > 1e-3) {
+                point_set.push_back(local_target_pt);
+            }
+
+            if (point_set.size() < 4) {
+                point_set.clear();
+                for (int i = 0; i < 4; ++i) {
+                    const double ratio = static_cast<double>(i) / 3.0;
+                    Eigen::Vector3d point = (1.0 - ratio) * start_pt + ratio * local_target_pt;
+                    point.z() = ratio > 0.0 && ratio < 1.0 ? 0.2 : point.z();
+                    point_set.push_back(point);
+                }
+            }
+
+            return point_set;
+        }
+
         bool trajectoryHitsInflatedMap(UniformBspline trajectory, const shared_ptr<GridMap2D> & grid_map)
         {
             if (!grid_map) {
@@ -127,7 +170,10 @@ namespace ego_planner
         bspline_optimizer_rebound_->a_star_->initGridMap(grid_map_, a_star_pool_size_);
     }
 
-    void PlannerInterface::setOccupancyGridMap(const nav_msgs::msg::OccupancyGrid& costmap, double inflate_values)
+    void PlannerInterface::setOccupancyGridMap(
+        const nav_msgs::msg::OccupancyGrid& costmap,
+        double inflate_values,
+        int occupied_cost_threshold)
     {
         if (!grid_map_) {
             return;
@@ -148,7 +194,7 @@ namespace ego_planner
             for (uint32_t col = 0; col < costmap.info.width; ++col) {
                 const std::size_t index = static_cast<std::size_t>(row) * costmap.info.width + col;
                 const int8_t value = costmap.data[index];
-                if (value < 0 || value >= 50) {
+                if (value < 0 || value >= occupied_cost_threshold) {
                     grid_map_->setObstacle(Eigen::Vector2i(static_cast<int>(col), static_cast<int>(row)), true);
                 }
             }
@@ -159,7 +205,9 @@ namespace ego_planner
         ensureAStarPoolCovers(map_size);
     }
 
-    void PlannerInterface::setNav2InflatedOccupancyGridMap(const nav_msgs::msg::OccupancyGrid& costmap)
+    void PlannerInterface::setNav2InflatedOccupancyGridMap(
+        const nav_msgs::msg::OccupancyGrid& costmap,
+        int occupied_cost_threshold)
     {
         if (!grid_map_) {
             return;
@@ -179,7 +227,7 @@ namespace ego_planner
             for (uint32_t col = 0; col < costmap.info.width; ++col) {
                 const std::size_t index = static_cast<std::size_t>(row) * costmap.info.width + col;
                 const int8_t value = costmap.data[index];
-                if (value < 0 || value >= 50) {
+                if (value < 0 || value >= occupied_cost_threshold) {
                     grid_map_->setObstacle(Eigen::Vector2i(static_cast<int>(col), static_cast<int>(row)), true);
                 }
             }
@@ -415,9 +463,68 @@ namespace ego_planner
             }
         } else {
             if (a_star_pathes_.empty() && initial_trajectory_hits_map) {
-                std::cerr << "[PlannerInterface::reboundReplan] 初始轨迹碰撞，但未生成 A* rebound 路径。" << std::endl;
-                continous_failures_count_++;
-                return false;
+                std::cerr << "[PlannerInterface::reboundReplan] 初始轨迹碰撞，但未生成 A* rebound 路径，"
+                          << "尝试整段局部 A* fallback。" << std::endl;
+
+                vector<Eigen::Vector2d> fallback_path;
+                const bool fallback_success =
+                    bspline_optimizer_rebound_->a_star_ &&
+                    bspline_optimizer_rebound_->a_star_->AstarSearch(
+                        std::max(0.05, grid_map_->getResolution()),
+                        start_pt.head<2>(),
+                        local_target_pt.head<2>());
+                if (fallback_success) {
+                    fallback_path = bspline_optimizer_rebound_->a_star_->getPath();
+                }
+
+                if (!fallback_success || fallback_path.size() < 2) {
+                    std::cerr << "[PlannerInterface::reboundReplan] 整段局部 A* fallback 失败: path_size="
+                              << fallback_path.size() << std::endl;
+                    continous_failures_count_++;
+                    return false;
+                }
+
+                vector<Eigen::Vector3d> fallback_point_set =
+                    buildFallbackPointSetFromAStar(
+                        fallback_path,
+                        start_pt,
+                        local_target_pt,
+                        pp_.ctrl_pt_dist);
+                start_vel = estimatePathTangent(fallback_point_set) *
+                    std::min(0.2, pp_.max_vel_);
+                start_end_derivatives[0] = start_vel;
+
+                ts = pp_.ctrl_pt_dist / std::max(pp_.max_vel_, 1e-3) * 1.2;
+                UniformBspline::parameterizeToBspline(
+                    ts,
+                    fallback_point_set,
+                    start_end_derivatives,
+                    ctrl_pts_3d);
+                if (ctrl_pts_3d.cols() == 0) {
+                    std::cerr << "[PlannerInterface::reboundReplan] 整段局部 A* fallback B-spline 参数化失败。" << std::endl;
+                    continous_failures_count_++;
+                    return false;
+                }
+
+                ctrl_pts_2d = ctrl_pts_3d.topRows(2);
+                a_star_pathes_.clear();
+                a_star_pathes_.push_back(fallback_path);
+
+                if (trajectoryHitsInflatedMap(UniformBspline(ctrl_pts_3d, 3, ts), grid_map_)) {
+                    std::cerr << "[PlannerInterface::reboundReplan] 整段局部 A* fallback 生成的 B-spline 仍然碰撞，"
+                              << "继续尝试 rebound 优化。" << std::endl;
+                    bspline_optimizer_rebound_->initControlPoints(ctrl_pts_2d, true);
+                } else {
+                    if (kVerbosePlannerLog) {
+                        std::cout << "整段局部 A* fallback 轨迹无碰撞，跳过 rebound 优化。" << std::endl;
+                    }
+                    ctrl_pts_3d = bspline_optimizer_rebound_->convert2DTo3D(ctrl_pts_2d);
+                    UniformBspline pos = UniformBspline(ctrl_pts_3d, 3, ts);
+                    pos.setPhysicalLimits(pp_.max_vel_, pp_.max_acc_, pp_.feasibility_tolerance_);
+                    updateTrajInfo(pos);
+                    continous_failures_count_ = 0;
+                    return true;
+                }
             }
 
             bool flag_step_1_success = bspline_optimizer_rebound_->BsplineOptimizeTrajRebound(ctrl_pts_2d, ts);
