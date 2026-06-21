@@ -2,35 +2,42 @@
 
 ## 框架说明
 
-* rm_bringup/pd2025_nav_bringup 启动包
-* livox_laser_simulation_RO2 Livox激光雷达仿真包（ROS2 版本）
+* pd2025_nav_bringup 启动包
 * livox_ros_driver2 激光雷达驱动包
 * autonomous_exploration_development_environment 地形分析
 * small_point_lio 对Odometry、雷达点云初步处理
 * loam_interface 对点云的坐标系从lidar_odom_到odom的转换,发布从odom到lidar的odometry：lidar_odometry
 * sensor_scan_generation 点云的坐标系从odom到lidar的转换，发布从odom到robot_base(gimbal)的odometry:odometry
-* rm_decision_cpp 决策模块
-* auto_aim_interfaces & rm_interfaces & ego_planner_interface消息定义
+* rm_interfaces & ego_planner_interface消息定义
 * pd_omni_pid_pursuit_controller 控制器插件
-* ign_sim_pointcloud_tool 仿真点云处理工具
+* cpp_lidar_filter & cpp_lidar_filter_pcd2 去除车身点云包
 * small_gicp_relocalization 重定位模块
 * fake_vel_transform cmd_vel速度处理，辅助路径规划
 * velocity_smoother_ext 速度平滑器
 * pointcloud_to_laserscan 将terrain_map_ext转换为laserScan类型以表示障碍物（仅 SLAM 模式启动）
 * control_panel 控制面板
-* cpp_lidar_filter 去除车身点云
 * nav2_mppi_ego_controller MPPI控制器插件
 * ego_planner Ego B-spline 规划器插件
+* rm_sentry_pp_nocrc_serial 上下位机通信，视觉与导航通信包
 
 > ## 待处理问题
 >
-> * colcon build太麻烦   //暂时解决方法：colcon build --cmake-args -DROS_EDITION=ros2 -DHUMBLE_ROS=humble
-> * 机器人自己移动，在场地交互模块中移动易发生漂移 //解决方法：发现地图倾斜，将地图模块修正
-> * 盲目拼接导致的接口、话题名字对不上，参数不准
-> * 潜在的功能重复问题
-> * 功能没有创新，只是对北极熊，火锅代码的复制拼接，没有寻找其他资源
-> * 无仿真环境还没有搞清楚
-> * 遇到坡上不去，有时候卡壳  //解决方法：速度平滑器的参数一不小心填错了，改正即可
+>* ego_planner状态机并不完美
+>* ego_planner,mppi的参数还没有调好，没有到达理想状态
+>* 地图膨胀处理存在问题
+>* 在高速旋转时里程计不稳定
+
+## 编译
+
+```bash
+CC=gcc-13 CXX=g++-13 \
+CMAKE_BUILD_PARALLEL_LEVEL=4 \
+MAKEFLAGS="-j4" \
+colcon build \
+  --symlink-install \
+  --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  --parallel-workers 4
+```
 
 ## 导航启动
 

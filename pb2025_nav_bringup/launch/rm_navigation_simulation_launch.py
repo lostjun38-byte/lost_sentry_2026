@@ -239,7 +239,7 @@ def generate_launch_description():
     # ld.add_action(start_velodyne_convert_tool)
     ld.add_action(bringup_cmd)
     ld.add_action(ego_planner_cmd)
-    ld.add_action(joy_teleop_cmd)
+    # ld.add_action(joy_teleop_cmd)
     ld.add_action(rviz_cmd)
     # ld.add_action(mid360_deskew_cmd)
     return ld
