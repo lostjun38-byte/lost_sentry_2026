@@ -168,6 +168,7 @@ private:
     Eigen::Vector3d map_origin_ = Eigen::Vector3d(0.0, 0.0, 0.0);
     double map_inflate_value_ = 1.0;
     double local_planning_horizon_ = 5.0;
+    int occupied_cost_threshold_ = 50;
 
     bool auto_plan_ = true;
     std::string frame_id_ = "map";

@@ -6,13 +6,14 @@
     auto_plan: true
     frame_id: "map"
     map_topic: "global_costmap/costmap"
+    occupied_cost_threshold: 95 # 范围为 1~99
 
     # Ego trajectory generation
     local_planning_horizon: 5.0
     path_sample_interval: 0.4
     reference_speed: 2.0
     reference_time_step: 0.1
-    terminal_slowdown_distance: 0.8
+    terminal_slowdown_distance: 2.0
 
     # Robot dynamic limits
     max_vel: 2.5
@@ -21,7 +22,7 @@
 
     # Nav2 path lifecycle and dynamic-obstacle replanning
     input_path_timeout: 3.0
-    replan_cooldown: 0.2
+    replan_cooldown: 0.5
     trajectory_collision_check_time: 1.5
     trajectory_collision_check_dt: 0.1
     trajectory_collision_check_distance: 3.0
