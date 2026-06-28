@@ -95,6 +95,11 @@ public:
   virtual void initialize() = 0;
 
   /**
+    * @brief Release critic resources during controller cleanup
+    */
+  virtual void cleanup() {}
+
+  /**
     * @brief Get name of critic
     */
   std::string getName()

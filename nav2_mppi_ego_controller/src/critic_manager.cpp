@@ -59,6 +59,15 @@ void CriticManager::loadCritics()
   }
 }
 
+void CriticManager::cleanup()
+{
+  for (auto & critic : critics_) {
+    critic->cleanup();
+  }
+  critics_.clear();
+  loader_.reset();
+}
+
 std::string CriticManager::getFullName(const std::string & name)
 {
   return "mppi_ego::critics::" + name;

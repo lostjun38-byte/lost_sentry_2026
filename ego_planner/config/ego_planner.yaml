@@ -6,7 +6,7 @@
     auto_plan: true
     frame_id: "map"
     map_topic: "global_costmap/costmap"
-    occupied_cost_threshold: 95 # 范围为 1~99
+    occupied_cost_threshold: 50 # 范围为 1~99
 
     # Ego trajectory generation
     local_planning_horizon: 5.0

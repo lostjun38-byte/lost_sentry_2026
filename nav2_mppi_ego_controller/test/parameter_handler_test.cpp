@@ -54,6 +54,7 @@ TEST(ParameterHandlerTest, asTypeConversionTest)
 {
   ParametersHandlerWrapper a;
   rclcpp::Parameter int_p("int_parameter", rclcpp::ParameterValue(1));
+  rclcpp::Parameter negative_int_p("negative_int_parameter", rclcpp::ParameterValue(-1));
   rclcpp::Parameter double_p("double_parameter", rclcpp::ParameterValue(10.0));
   rclcpp::Parameter bool_p("bool_parameter", rclcpp::ParameterValue(false));
   rclcpp::Parameter string_p("string_parameter", rclcpp::ParameterValue(std::string("hello")));
@@ -66,6 +67,7 @@ TEST(ParameterHandlerTest, asTypeConversionTest)
     "stringv_parameter", rclcpp::ParameterValue(std::vector<std::string>{std::string("hello")}));
 
   EXPECT_EQ(a.asWrapped<int>(int_p), 1);
+  EXPECT_EQ(a.asWrapped<size_t>(negative_int_p), 0u);
   EXPECT_EQ(a.asWrapped<double>(double_p), 10.0);
   EXPECT_EQ(a.asWrapped<bool>(bool_p), false);
   EXPECT_EQ(a.asWrapped<std::string>(string_p), std::string("hello"));
@@ -178,4 +180,22 @@ TEST(ParameterHandlerTest, DynamicAndStaticParametersTest)
   // Now, only param1 should change, param 2 should be the same
   EXPECT_EQ(p1, 10);
   EXPECT_EQ(p2, 7);
+}
+
+TEST(ParameterHandlerTest, CleanupClearsDynamicCallbacks)
+{
+  bool post_triggered = false;
+  bool val = false;
+  rclcpp::Parameter dynamic_param("dynamic_bool", rclcpp::ParameterValue(true));
+
+  ParametersHandlerWrapper handler;
+  handler.addPostCallback([&]() {post_triggered = true;});
+  handler.setDynamicParamCallback(val, "dynamic_bool");
+
+  handler.cleanup();
+  auto result = handler.dynamicParamsCallback(std::vector<rclcpp::Parameter>{dynamic_param});
+
+  EXPECT_TRUE(result.successful);
+  EXPECT_FALSE(post_triggered);
+  EXPECT_FALSE(val);
 }

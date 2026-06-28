@@ -63,6 +63,11 @@ public:
   void start();
 
   /**
+    * @brief Stops processing dynamic parameter changes and clears callbacks
+    */
+  void cleanup();
+
+  /**
     * @brief Dynamic parameter callback
     * @param parameter Parameter changes to process
     * @return Set Parameter Result
@@ -246,7 +251,12 @@ auto ParametersHandler::as(const rclcpp::Parameter & parameter)
   if constexpr (std::is_same_v<T, bool>) {
     return parameter.as_bool();
   } else if constexpr (std::is_integral_v<T>) {
-    return parameter.as_int();
+    const auto value = parameter.as_int();
+    if constexpr (std::is_unsigned_v<T>) {
+      return static_cast<T>(value < 0 ? 0 : value);
+    } else {
+      return value;
+    }
   } else if constexpr (std::is_floating_point_v<T>) {
     return parameter.as_double();
   } else if constexpr (std::is_same_v<T, std::string>) {

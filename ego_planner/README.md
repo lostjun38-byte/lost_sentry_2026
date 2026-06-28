@@ -248,6 +248,7 @@ EgoTrajectoryCritic:
   enabled: true
   ego_trajectory_topic: "/ego_reference_trajectory"
   max_reference_age: 0.5
+  threshold_to_consider: 0.7
 ```
 
 原则：

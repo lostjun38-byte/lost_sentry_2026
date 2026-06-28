@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <stdint.h>
+#include <algorithm>
 #include <chrono>
 #include "nav2_mppi_ego_controller/controller.hpp"
 #include "nav2_mppi_ego_controller/tools/utils.hpp"
@@ -36,12 +37,21 @@ void MPPIController::configure(
   auto node = parent_.lock();
   clock_ = node->get_clock();
   last_time_called_ = clock_->now();
+  last_ego_global_path_publish_ = rclcpp::Time(0, 0, clock_->get_clock_type());
   // Get high-level controller parameters
   auto getParam = parameters_handler_->getParamGetter(name_);
   getParam(visualize_, "visualize", false);
   getParam(reset_period_, "reset_period", 1.0);
-  getParam(publish_ego_global_path_, "publish_ego_global_path", true);
-  getParam(ego_global_path_topic_, "ego_global_path_topic", std::string("ego_planner/input_path"));
+  getParam(publish_ego_global_path_, "publish_ego_global_path", true, ParameterType::Static);
+  getParam(
+    ego_global_path_topic_, "ego_global_path_topic",
+    std::string("ego_planner/input_path"), ParameterType::Static);
+  getParam(ego_global_path_republish_period_, "ego_global_path_republish_period", 1.0);
+  ego_global_path_republish_period_ = std::max(ego_global_path_republish_period_, 0.0);
+  parameters_handler_->addPostCallback(
+    [this]() {
+      ego_global_path_republish_period_ = std::max(ego_global_path_republish_period_, 0.0);
+    });
 
   if (publish_ego_global_path_) {
     ego_global_path_pub_ = node->create_publisher<nav_msgs::msg::Path>(ego_global_path_topic_, 1);
@@ -59,6 +69,9 @@ void MPPIController::configure(
 
 void MPPIController::cleanup()
 {
+  if (parameters_handler_) {
+    parameters_handler_->cleanup();
+  }
   optimizer_.shutdown();
   trajectory_visualizer_.on_cleanup();
   ego_global_path_pub_.reset();
@@ -107,6 +120,19 @@ geometry_msgs::msg::TwistStamped MPPIController::computeVelocityCommands(
   std::lock_guard<std::mutex> param_lock(*parameters_handler_->getLock());
   nav_msgs::msg::Path transformed_plan = path_handler_.transformPath(robot_pose);
 
+  if (publish_ego_global_path_ && ego_global_path_pub_ && ego_global_path_pub_->is_activated() &&
+    !latest_plan_.poses.empty())
+  {
+    const auto now = clock_->now();
+    if (ego_global_path_republish_period_ <= 0.0 ||
+      last_ego_global_path_publish_.nanoseconds() == 0 ||
+      now - last_ego_global_path_publish_ >=
+      rclcpp::Duration::from_seconds(ego_global_path_republish_period_))
+    {
+      publishEgoGlobalPath(latest_plan_);
+    }
+  }
+
   nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
   std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> costmap_lock(*(costmap->getMutex()));
 
@@ -136,8 +162,15 @@ void MPPIController::visualize(nav_msgs::msg::Path transformed_plan)
 void MPPIController::setPlan(const nav_msgs::msg::Path & path)
 {
   path_handler_.setPath(path);
+  latest_plan_ = path;
+  publishEgoGlobalPath(latest_plan_);
+}
+
+void MPPIController::publishEgoGlobalPath(const nav_msgs::msg::Path & path)
+{
   if (ego_global_path_pub_ && ego_global_path_pub_->is_activated()) {
     ego_global_path_pub_->publish(path);
+    last_ego_global_path_publish_ = clock_->now();
     RCLCPP_INFO_THROTTLE(
       logger_, *clock_, 2000,
       "Published Nav2 plan to Ego-Planner input: topic=%s, poses=%zu",

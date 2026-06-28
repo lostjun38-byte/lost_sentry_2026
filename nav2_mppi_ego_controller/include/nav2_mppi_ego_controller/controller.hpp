@@ -109,6 +109,11 @@ protected:
     */
   void visualize(nav_msgs::msg::Path transformed_plan);
 
+  /**
+    * @brief Republish active Nav2 path to Ego-Planner to keep the reference alive
+    */
+  void publishEgoGlobalPath(const nav_msgs::msg::Path & path);
+
   std::string name_;
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_;
   rclcpp::Clock::SharedPtr clock_;
@@ -126,7 +131,10 @@ protected:
   bool publish_ego_global_path_{true};
 
   double reset_period_;
+  double ego_global_path_republish_period_{1.0};
   std::string ego_global_path_topic_;
+  nav_msgs::msg::Path latest_plan_;
+  rclcpp::Time last_ego_global_path_publish_;
   // Last time computeVelocityCommands was called
   rclcpp::Time last_time_called_;
 };

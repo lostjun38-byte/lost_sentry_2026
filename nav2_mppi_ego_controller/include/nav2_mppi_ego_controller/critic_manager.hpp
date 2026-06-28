@@ -64,6 +64,11 @@ public:
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS>, ParametersHandler *);
 
   /**
+    * @brief Cleanup loaded critic plugins
+    */
+  void cleanup();
+
+  /**
     * @brief Score trajectories by the set of loaded critic functions
     * @param CriticData Struct of necessary information to pass to the critic functions
     */

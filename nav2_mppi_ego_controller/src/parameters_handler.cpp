@@ -38,6 +38,15 @@ void ParametersHandler::start()
   get_param(verbose_, "verbose", false);
 }
 
+void ParametersHandler::cleanup()
+{
+  std::lock_guard<std::mutex> lock(parameters_change_mutex_);
+  on_set_param_handler_.reset();
+  get_param_callbacks_.clear();
+  pre_callbacks_.clear();
+  post_callbacks_.clear();
+}
+
 rcl_interfaces::msg::SetParametersResult
 ParametersHandler::dynamicParamsCallback(
   std::vector<rclcpp::Parameter> parameters)

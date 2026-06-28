@@ -56,6 +56,7 @@ void Optimizer::initialize(
 
 void Optimizer::shutdown()
 {
+  critic_manager_.cleanup();
   noise_generator_.shutdown();
 }
 

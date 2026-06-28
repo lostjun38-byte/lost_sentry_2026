@@ -16,6 +16,7 @@
 #define NAV2_MPPI_EGO_CONTROLLER__CRITICS__EGO_TRAJECTORY_CRITIC_HPP_
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -43,6 +44,7 @@ class EgoTrajectoryCritic : public CriticFunction
 public:
   void initialize() override;
   void score(CriticData & data) override;
+  void cleanup() override;
 
 protected:
   struct EgoTrajPoint
@@ -56,12 +58,23 @@ protected:
     float acceleration{0.0f};
   };
 
+  struct TrajectorySnapshot
+  {
+    std::vector<EgoTrajPoint> points;
+    double dt{0.1};
+    rclcpp::Time last_update;
+  };
+
   void trajectoryCallback(const ego_planner_msgs::msg::Trajectory::SharedPtr msg);
   std::vector<EgoTrajPoint> buildTrajectory(
     const ego_planner_msgs::msg::Trajectory & trajectory_msg);
   EgoTrajPoint sampleTrajectoryByTime(
     const std::vector<EgoTrajPoint> & trajectory,
     float query_time) const;
+  EgoTrajPoint sampleTrajectoryByTimeFromIndex(
+    const std::vector<EgoTrajPoint> & trajectory,
+    float query_time,
+    size_t & lower_idx) const;
   size_t findClosestReferenceIndex(
     const std::vector<EgoTrajPoint> & trajectory,
     float x, float y) const;
@@ -92,18 +105,19 @@ protected:
     const xt::xtensor<float, 1> & added_costs) const;
   bool debugShouldRun(double & last_run_time, double current_time) const;
   int64_t debugThrottleMs() const;
+  void getParameters();
+  void sanitizeParameters();
 
   rclcpp::Subscription<ego_planner_msgs::msg::Trajectory>::SharedPtr ego_trajectory_sub_;
 
   std::mutex trajectory_mutex_;
-  std::vector<EgoTrajPoint> ego_trajectory_;
-  double ego_trajectory_dt_{0.1};
-  rclcpp::Time last_trajectory_update_;
+  std::shared_ptr<const TrajectorySnapshot> trajectory_snapshot_;
   bool stale_warning_active_{false};
 
   std::string ego_trajectory_topic_;
   double max_reference_age_{0.0};
   double lookahead_time_{0.0};
+  double threshold_to_consider_{0.0};
   double max_match_distance_{0.0};
   double reference_dt_{0.0};
   double max_reference_speed_{0.0};

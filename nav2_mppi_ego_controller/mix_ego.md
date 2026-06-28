@@ -91,30 +91,31 @@ critics:
 EgoTrajectoryCritic:
   enabled: true
   cost_power: 1
-  cost_weight: 8.0
+  cost_weight: 12.0
 
   ego_trajectory_topic: "/ego_reference_trajectory"
 
   position_weight: 1.0
-  yaw_weight: 0.1
-  velocity_weight: 0.2
-  velocity_direction_weight: 0.4
+  yaw_weight: 0.01
+  velocity_weight: 0.4
+  velocity_direction_weight: 0.3
   velocity_direction_min_speed: 0.05
 
   use_curvature_cost: true
-  curvature_weight: 0.1
+  curvature_weight: 0.15
   max_reference_curvature: 5.0
   max_candidate_curvature: 8.0
 
   use_acceleration_cost: false
-  acceleration_weight: 0.05
+  acceleration_weight: 0.1
   max_reference_acceleration: 5.0
   max_candidate_acceleration: 8.0
 
   velocity_frame: "base"
 
   max_reference_age: 0.5
-  lookahead_time: 1.0
+  lookahead_time: 1.2
+  threshold_to_consider: 0.7
   max_match_distance: 1.0
   reference_dt: 0.1
   max_reference_speed: 3.0
@@ -261,13 +262,14 @@ controller_server:
 
 ```yaml
 EgoTrajectoryCritic:
-  cost_weight: 8.0
+  cost_weight: 12.0
   position_weight: 1.0
-  velocity_weight: 0.5
+  velocity_weight: 0.4
   velocity_direction_weight: 0.3
   max_match_distance: 1.0
-  distance_penalty_weight: 15.0
-  lookahead_time: 1.0
+  distance_penalty_weight: 10.0
+  lookahead_time: 1.2
+  threshold_to_consider: 0.7
 
 PathFollowCritic:
   cost_weight: 5.0

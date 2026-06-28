@@ -12,7 +12,7 @@
 EgoTrajectoryCritic:
   enabled: true
   cost_power: 1
-  cost_weight: 8.0
+  cost_weight: 12.0
 
   ego_trajectory_topic: "/ego_reference_trajectory"
 
@@ -35,7 +35,8 @@ EgoTrajectoryCritic:
   velocity_frame: "base"
 
   max_reference_age: 0.5
-  lookahead_time: 1.0
+  lookahead_time: 1.2
+  threshold_to_consider: 0.7
   max_match_distance: 1.0
   reference_dt: 0.1
   max_reference_speed: 3.0
@@ -65,6 +66,7 @@ EgoTrajectoryCritic:
 | `ego_trajectory_topic` | string | `"/ego_reference_trajectory"` | - | Ego-Planner 参考轨迹订阅话题。 |
 | `max_reference_age` | double | `1.0` | s | 参考轨迹最大允许年龄，超时则跳过本 critic。 |
 | `lookahead_time` | double | `1.0` | s | 本 critic 在 MPPI 预测时域内参与打分的前瞻时长。 |
+| `threshold_to_consider` | double | `0.0` | m | 机器人进入目标附近该距离内时跳过本 critic，让 goal/path critic 接管末端行为。 |
 | `max_match_distance` | double | `1.0` | m | 候选轨迹点离参考点超过该距离后，额外增加距离惩罚。 |
 | `reference_dt` | double | `0.1` | s | 当消息 `time_step <= 0` 或缺少显式时间时使用的参考轨迹时间步长。 |
 | `max_reference_speed` | double | `3.0` | m/s | 对参考速度做上限裁剪，防止异常参考速度放大代价。 |
@@ -122,6 +124,7 @@ ego_planner_msgs::msg::Trajectory
 默认值是 `"/ego_reference_trajectory"`。
 
 如果话题名配置错误，本 critic 不会收到参考轨迹，`score()` 会因为内部参考轨迹为空而直接返回。
+该参数只在 controller configure 阶段生效；运行中动态修改不会重新创建订阅。
 
 ## 时间与轨迹有效性参数
 
@@ -155,6 +158,20 @@ ego_planner_msgs::msg::Trajectory
 
 - 过短：只约束当前附近，未来弯道利用不足。
 - 过长：可能让本 critic 过早拉向远处参考，和避障 critic 冲突。
+
+### `threshold_to_consider`
+
+机器人距离全局目标小于该值时，本 critic 跳过打分。
+
+用途：
+
+- 接近终点时，避免 Ego 参考轨迹继续拉扯 MPPI 的末端对齐。
+- 与 `GoalCritic`、`GoalAngleCritic`、`PathFollowCritic` 的接管范围保持一致。
+
+建议值：
+
+- 若其他 goal/path critic 使用 `0.7`，本参数也建议从 `0.7` 开始。
+- 设为 `0.0` 表示不启用该近目标跳过逻辑。
 
 ### `reference_dt`
 

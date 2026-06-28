@@ -28,7 +28,7 @@
 #include <xtensor/xview.hpp>
 
 #include "angles/angles.h"
-#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "tf2/LinearMath/Transform.h"
 #include "tf2/utils.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
@@ -187,10 +187,34 @@ float getPointAcceleration(const PointT & point, bool & valid)
 
 void EgoTrajectoryCritic::initialize()
 {
+  getParameters();
+
+  auto node = parent_.lock();
+  {
+    auto snapshot = std::make_shared<TrajectorySnapshot>();
+    snapshot->last_update = node->now();
+    std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    trajectory_snapshot_ = snapshot;
+  }
+
+  ego_trajectory_sub_ = node->create_subscription<ego_planner_msgs::msg::Trajectory>(
+    ego_trajectory_topic_, rclcpp::QoS(10),
+    std::bind(&EgoTrajectoryCritic::trajectoryCallback, this, std::placeholders::_1));
+
+  RCLCPP_INFO(
+    logger_,
+    "EgoTrajectoryCritic subscribed to '%s'", ego_trajectory_topic_.c_str());
+}
+
+void EgoTrajectoryCritic::getParameters()
+{
   auto getParam = parameters_handler_->getParamGetter(name_);
-  getParam(ego_trajectory_topic_, "ego_trajectory_topic", std::string("/ego_reference_trajectory"));
+  getParam(
+    ego_trajectory_topic_, "ego_trajectory_topic",
+    std::string("/ego_reference_trajectory"), ParameterType::Static);
   getParam(max_reference_age_, "max_reference_age", 1.0);
   getParam(lookahead_time_, "lookahead_time", 1.0);
+  getParam(threshold_to_consider_, "threshold_to_consider", 0.0);
   getParam(max_match_distance_, "max_match_distance", 1.0);
   getParam(reference_dt_, "reference_dt", 0.1);
   getParam(max_reference_speed_, "max_reference_speed", 3.0);
@@ -226,13 +250,34 @@ void EgoTrajectoryCritic::initialize()
   getParam(debug_max_cost_, "debug_max_cost", 1.0e6);
   getParam(debug_large_error_distance_, "debug_large_error_distance", 2.0);
 
+  sanitizeParameters();
+  parameters_handler_->addPostCallback([this]() {sanitizeParameters();});
+}
+
+void EgoTrajectoryCritic::cleanup()
+{
+  ego_trajectory_sub_.reset();
+  std::lock_guard<std::mutex> lock(trajectory_mutex_);
+  trajectory_snapshot_.reset();
+}
+
+void EgoTrajectoryCritic::sanitizeParameters()
+{
   reference_dt_ = std::max(reference_dt_, 1e-3);
   max_reference_age_ = std::max(max_reference_age_, 0.0);
   lookahead_time_ = std::max(lookahead_time_, 0.0);
+  threshold_to_consider_ = std::max(threshold_to_consider_, 0.0);
   max_match_distance_ = std::max(max_match_distance_, 0.0);
   max_reference_speed_ = std::max(max_reference_speed_, 0.0);
+  cost_weight_ = std::max(cost_weight_, 0.0f);
+  position_weight_ = std::max(position_weight_, 0.0f);
+  yaw_weight_ = std::max(yaw_weight_, 0.0f);
+  velocity_weight_ = std::max(velocity_weight_, 0.0f);
+  velocity_direction_weight_ = std::max(velocity_direction_weight_, 0.0f);
   velocity_direction_min_speed_ = std::max(velocity_direction_min_speed_, 0.0f);
+  distance_penalty_weight_ = std::max(distance_penalty_weight_, 0.0f);
   trajectory_point_step_ = std::max<size_t>(trajectory_point_step_, 1);
+  power_ = std::max<unsigned int>(power_, 1);
   curvature_weight_ = std::max(curvature_weight_, 0.0f);
   max_reference_curvature_ = std::max(max_reference_curvature_, 0.0);
   max_candidate_curvature_ = std::max(max_candidate_curvature_, 0.0);
@@ -262,16 +307,6 @@ void EgoTrajectoryCritic::initialize()
     velocity_frame_ = "base";
     velocity_frame_is_global_ = false;
   }
-
-  auto node = parent_.lock();
-  ego_trajectory_sub_ = node->create_subscription<ego_planner_msgs::msg::Trajectory>(
-    ego_trajectory_topic_, rclcpp::QoS(10),
-    std::bind(&EgoTrajectoryCritic::trajectoryCallback, this, std::placeholders::_1));
-
-  last_trajectory_update_ = node->now();
-  RCLCPP_INFO(
-    logger_,
-    "EgoTrajectoryCritic subscribed to '%s'", ego_trajectory_topic_.c_str());
 }
 
 void EgoTrajectoryCritic::trajectoryCallback(
@@ -283,10 +318,13 @@ void EgoTrajectoryCritic::trajectoryCallback(
 
   debugCheckReferenceTrajectory(trajectory, msg->header.frame_id, trajectory_dt);
 
+  auto snapshot = std::make_shared<TrajectorySnapshot>();
+  snapshot->points = std::move(trajectory);
+  snapshot->dt = std::max(trajectory_dt, 1e-3);
+  snapshot->last_update = node->now();
+
   std::lock_guard<std::mutex> lock(trajectory_mutex_);
-  ego_trajectory_ = std::move(trajectory);
-  ego_trajectory_dt_ = std::max(trajectory_dt, 1e-3);
-  last_trajectory_update_ = node->now();
+  trajectory_snapshot_ = std::move(snapshot);
 }
 
 std::vector<EgoTrajectoryCritic::EgoTrajPoint>
@@ -311,6 +349,22 @@ EgoTrajectoryCritic::buildTrajectory(
   const std::string target_frame = costmap_ros_->getGlobalFrameID();
   const bool should_transform =
     !trajectory_msg.header.frame_id.empty() && trajectory_msg.header.frame_id != target_frame;
+  geometry_msgs::msg::TransformStamped transform;
+  tf2::Transform transform_tf;
+  if (should_transform) {
+    try {
+      transform = costmap_ros_->getTfBuffer()->lookupTransform(
+        target_frame, trajectory_msg.header.frame_id,
+        trajectory_msg.header.stamp, tf2::durationFromSec(0.05));
+      tf2::fromMsg(transform.transform, transform_tf);
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN_THROTTLE(
+        logger_, *parent_.lock()->get_clock(), 2000,
+        "Failed to look up Ego trajectory transform from '%s' to '%s': %s",
+        trajectory_msg.header.frame_id.c_str(), target_frame.c_str(), ex.what());
+      return {};
+    }
+  }
 
   for (size_t i = 0; i != trajectory_msg.points.size(); ++i) {
     const auto & trajectory_point = trajectory_msg.points[i];
@@ -324,35 +378,35 @@ EgoTrajectoryCritic::buildTrajectory(
     const auto point_acceleration =
       getPointAcceleration(trajectory_point, has_valid_acceleration);
 
-    geometry_msgs::msg::PoseStamped reference_pose;
-    reference_pose.header = trajectory_msg.header;
-    reference_pose.pose.position.x = trajectory_point.x;
-    reference_pose.pose.position.y = trajectory_point.y;
-    reference_pose.pose.position.z = trajectory_point.z;
+    if (!isReasonableFloat(static_cast<float>(trajectory_point.x)) ||
+      !isReasonableFloat(static_cast<float>(trajectory_point.y)) ||
+      !isReasonableFloat(static_cast<float>(trajectory_point.z)))
+    {
+      RCLCPP_WARN_THROTTLE(
+        logger_, *parent_.lock()->get_clock(), 2000,
+        "Ignoring Ego trajectory with non-finite or out-of-range position at index %zu.",
+        i);
+      return {};
+    }
 
-    tf2::Quaternion quaternion;
-    quaternion.setRPY(0.0, 0.0, has_valid_yaw ? point_yaw : 0.0f);
-    reference_pose.pose.orientation = tf2::toMsg(quaternion);
-
-    geometry_msgs::msg::PoseStamped transformed_pose = reference_pose;
+    tf2::Vector3 transformed_position(
+      trajectory_point.x, trajectory_point.y, trajectory_point.z);
+    float transformed_yaw = point_yaw;
     if (should_transform) {
-      try {
-        transformed_pose = costmap_ros_->getTfBuffer()->transform(
-          reference_pose, target_frame, tf2::durationFromSec(0.05));
-      } catch (const tf2::TransformException & ex) {
-        RCLCPP_WARN_THROTTLE(
-          logger_, *parent_.lock()->get_clock(), 2000,
-          "Failed to transform Ego trajectory from '%s' to '%s': %s",
-          trajectory_msg.header.frame_id.c_str(), target_frame.c_str(), ex.what());
-        return {};
+      transformed_position = transform_tf * transformed_position;
+      if (has_valid_yaw) {
+        tf2::Quaternion point_quaternion;
+        point_quaternion.setRPY(0.0, 0.0, point_yaw);
+        transformed_yaw = static_cast<float>(
+          tf2::getYaw(transform_tf.getRotation() * point_quaternion));
       }
     }
 
     EgoTrajPoint point;
     point.t = getPointTime(trajectory_point, i, trajectory_dt);
-    point.x = static_cast<float>(transformed_pose.pose.position.x);
-    point.y = static_cast<float>(transformed_pose.pose.position.y);
-    point.yaw = static_cast<float>(tf2::getYaw(transformed_pose.pose.orientation));
+    point.x = static_cast<float>(transformed_position.x());
+    point.y = static_cast<float>(transformed_position.y());
+    point.yaw = transformed_yaw;
     point.speed = std::min(
       std::max(has_valid_speed ? point_speed : 0.0f, 0.0f),
       static_cast<float>(max_reference_speed_));
@@ -395,30 +449,49 @@ EgoTrajectoryCritic::sampleTrajectoryByTime(
   const std::vector<EgoTrajPoint> & trajectory,
   float query_time) const
 {
+  size_t lower_idx = 0;
+  return sampleTrajectoryByTimeFromIndex(trajectory, query_time, lower_idx);
+}
+
+EgoTrajectoryCritic::EgoTrajPoint
+EgoTrajectoryCritic::sampleTrajectoryByTimeFromIndex(
+  const std::vector<EgoTrajPoint> & trajectory,
+  float query_time,
+  size_t & lower_idx) const
+{
   if (trajectory.empty()) {
     return {};
   }
 
   if (query_time <= trajectory.front().t) {
+    lower_idx = 0;
     return trajectory.front();
   }
 
   if (query_time >= trajectory.back().t) {
+    lower_idx = trajectory.size() - 1;
     return trajectory.back();
   }
 
-  const auto upper = std::lower_bound(
-    trajectory.begin(), trajectory.end(), query_time,
-    [](const EgoTrajPoint & point, float time) {
-      return point.t < time;
-    });
-
-  if (upper == trajectory.begin()) {
-    return trajectory.front();
+  if (lower_idx >= trajectory.size() || trajectory[lower_idx].t > query_time) {
+    const auto upper = std::lower_bound(
+      trajectory.begin(), trajectory.end(), query_time,
+      [](const EgoTrajPoint & point, float time) {
+        return point.t < time;
+      });
+    lower_idx = upper == trajectory.begin() ?
+      0 : static_cast<size_t>(std::distance(trajectory.begin(), upper - 1));
+  } else {
+    while (lower_idx + 1 < trajectory.size() &&
+      trajectory[lower_idx + 1].t < query_time)
+    {
+      ++lower_idx;
+    }
   }
 
-  const auto & next = *upper;
-  const auto & prev = *(upper - 1);
+  const size_t next_idx = std::min(lower_idx + 1, trajectory.size() - 1);
+  const auto & prev = trajectory[lower_idx];
+  const auto & next = trajectory[next_idx];
   const float duration = std::max(next.t - prev.t, kEpsilon);
   const float ratio = std::clamp((query_time - prev.t) / duration, 0.0f, 1.0f);
 
@@ -991,19 +1064,29 @@ void EgoTrajectoryCritic::score(CriticData & data)
     return;
   }
 
-  std::vector<EgoTrajPoint> trajectory;
-  double trajectory_dt;
-  rclcpp::Time last_update;
+  if (threshold_to_consider_ > 0.0 &&
+    utils::withinPositionGoalTolerance(
+      static_cast<float>(threshold_to_consider_), data.state.pose.pose, data.path))
   {
-    std::lock_guard<std::mutex> lock(trajectory_mutex_);
-    trajectory = ego_trajectory_;
-    trajectory_dt = ego_trajectory_dt_;
-    last_update = last_trajectory_update_;
+    return;
   }
 
+  std::shared_ptr<const TrajectorySnapshot> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(trajectory_mutex_);
+    snapshot = trajectory_snapshot_;
+  }
+
+  if (!snapshot) {
+    return;
+  }
+
+  const auto & trajectory = snapshot->points;
   if (trajectory.size() < 2) {
     return;
   }
+  const double trajectory_dt = snapshot->dt;
+  const auto last_update = snapshot->last_update;
 
   auto node = parent_.lock();
   const auto now = node->now();
@@ -1041,7 +1124,8 @@ void EgoTrajectoryCritic::score(CriticData & data)
   const auto robot_x = static_cast<float>(data.state.pose.pose.position.x);
   const auto robot_y = static_cast<float>(data.state.pose.pose.position.y);
   const size_t start_idx = findClosestReferenceIndex(trajectory, robot_x, robot_y);
-  const float start_time = trajectory[start_idx].t;
+  const float start_time = trajectory[start_idx].t + static_cast<float>(
+    std::max(reference_age.seconds(), 0.0));
   const bool debug_runtime =
     debug_enabled_ && debug_check_score_runtime_ &&
     debugShouldRun(last_score_debug_time_, now.seconds());
@@ -1049,83 +1133,99 @@ void EgoTrajectoryCritic::score(CriticData & data)
     debugCheckScoreRuntime(data, trajectory, start_idx, trajectory_dt, time_steps);
   }
 
-  xt::xtensor<float, 1> accumulated_cost = xt::zeros<float>({data.costs.shape(0)});
+  const size_t batch_size = data.costs.shape(0);
+  xt::xtensor<float, 1> accumulated_cost = xt::zeros<float>({batch_size});
   size_t sample_count = 0;
+  size_t reference_lower_idx = start_idx;
+  const bool use_velocity_costs =
+    velocity_weight_ > 0.0f || velocity_direction_weight_ > 0.0f ||
+    (use_acceleration_cost_ && acceleration_weight_ > 0.0f);
+  const bool use_velocity_direction_cost =
+    velocity_direction_weight_ > 0.0f;
+  const bool use_curvature_cost =
+    use_curvature_cost_ && curvature_weight_ > 0.0f;
+  const bool use_acceleration_cost =
+    use_acceleration_cost_ && acceleration_weight_ > 0.0f;
+  const bool use_match_distance = max_match_distance_ > 0.0;
+  const auto max_match_distance = static_cast<float>(max_match_distance_);
+  const auto max_candidate_curvature = static_cast<float>(max_candidate_curvature_);
+  const auto max_candidate_acceleration = static_cast<float>(max_candidate_acceleration_);
 
   for (size_t t = 0; t < time_steps; t += trajectory_point_step_) {
-    const auto ref = sampleTrajectoryByTime(
-      trajectory, start_time + static_cast<float>(t) * model_dt);
+    const auto ref = sampleTrajectoryByTimeFromIndex(
+      trajectory, start_time + static_cast<float>(t) * model_dt, reference_lower_idx);
 
-    const auto traj_x = xt::view(data.trajectories.x, xt::all(), t);
-    const auto traj_y = xt::view(data.trajectories.y, xt::all(), t);
-    const auto traj_yaw = xt::view(data.trajectories.yaws, xt::all(), t);
-    const auto traj_vx = xt::view(data.state.vx, xt::all(), t);
-    const auto traj_vy = xt::view(data.state.vy, xt::all(), t);
+    for (size_t i = 0; i != batch_size; ++i) {
+      const float traj_x = data.trajectories.x(i, t);
+      const float traj_y = data.trajectories.y(i, t);
+      const float traj_yaw = data.trajectories.yaws(i, t);
+      const float traj_vx = data.state.vx(i, t);
+      const float traj_vy = data.state.vy(i, t);
 
-    auto position_error = xt::sqrt(
-      xt::pow(traj_x - ref.x, 2) +
-      xt::pow(traj_y - ref.y, 2));
-    auto yaw_error = xt::cast<float>(
-      xt::fabs(utils::shortest_angular_distance(traj_yaw, ref.yaw)));
-    auto candidate_speed = xt::sqrt(xt::pow(traj_vx, 2) + xt::pow(traj_vy, 2));
-    auto speed_error = xt::fabs(candidate_speed - ref.speed);
+      const float position_error = std::hypot(traj_x - ref.x, traj_y - ref.y);
+      float step_cost = position_weight_ * position_error;
 
-    auto velocity_x = xt::eval(traj_vx);
-    auto velocity_y = xt::eval(traj_vy);
-    if (!velocity_frame_is_global_) {
-      // MPPI state.vx/vy are body-frame velocities in this controller; rotate to global by default.
-      velocity_x = xt::eval(traj_vx * xt::cos(traj_yaw) - traj_vy * xt::sin(traj_yaw));
-      velocity_y = xt::eval(traj_vx * xt::sin(traj_yaw) + traj_vy * xt::cos(traj_yaw));
+      if (yaw_weight_ > 0.0f) {
+        step_cost += yaw_weight_ * static_cast<float>(
+          std::fabs(angles::shortest_angular_distance(traj_yaw, ref.yaw)));
+      }
+
+      float candidate_speed = 0.0f;
+      if (use_velocity_costs) {
+        candidate_speed = std::hypot(traj_vx, traj_vy);
+      }
+
+      if (velocity_weight_ > 0.0f) {
+        step_cost += velocity_weight_ * std::fabs(candidate_speed - ref.speed);
+      }
+
+      if (use_velocity_direction_cost && candidate_speed > velocity_direction_min_speed_) {
+        float velocity_x = traj_vx;
+        float velocity_y = traj_vy;
+        if (!velocity_frame_is_global_) {
+          const float yaw_cos = std::cos(traj_yaw);
+          const float yaw_sin = std::sin(traj_yaw);
+          velocity_x = traj_vx * yaw_cos - traj_vy * yaw_sin;
+          velocity_y = traj_vx * yaw_sin + traj_vy * yaw_cos;
+        }
+
+        const float velocity_yaw = std::atan2(velocity_y, velocity_x);
+        step_cost += velocity_direction_weight_ * static_cast<float>(
+          std::fabs(angles::shortest_angular_distance(velocity_yaw, ref.yaw)));
+      }
+
+      if (use_curvature_cost && t > 0) {
+        const float prev_x = data.trajectories.x(i, t - 1);
+        const float prev_y = data.trajectories.y(i, t - 1);
+        const float prev_yaw = data.trajectories.yaws(i, t - 1);
+        const float ds_candidate = std::hypot(traj_x - prev_x, traj_y - prev_y);
+        const float dyaw_candidate = static_cast<float>(
+          angles::shortest_angular_distance(prev_yaw, traj_yaw));
+        const float candidate_curvature = std::clamp(
+          dyaw_candidate / std::max(ds_candidate, kEpsilon),
+          -max_candidate_curvature, max_candidate_curvature);
+        step_cost += curvature_weight_ * std::fabs(candidate_curvature - ref.curvature);
+      }
+
+      if (use_acceleration_cost && t > 0) {
+        const float prev_vx = data.state.vx(i, t - 1);
+        const float prev_vy = data.state.vy(i, t - 1);
+        const float prev_candidate_speed = std::hypot(prev_vx, prev_vy);
+        const float candidate_acceleration = std::clamp(
+          (candidate_speed - prev_candidate_speed) / model_dt,
+          -max_candidate_acceleration, max_candidate_acceleration);
+        step_cost += acceleration_weight_ * std::fabs(
+          candidate_acceleration - ref.acceleration);
+      }
+
+      if (use_match_distance) {
+        step_cost += distance_penalty_weight_ *
+          std::max(position_error - max_match_distance, 0.0f);
+      }
+
+      accumulated_cost(i) += step_cost;
     }
-    auto velocity_yaw = xt::atan2(velocity_y, velocity_x);
-    auto velocity_direction_error = xt::where(
-      candidate_speed > velocity_direction_min_speed_,
-      xt::cast<float>(xt::fabs(utils::shortest_angular_distance(velocity_yaw, ref.yaw))),
-      0.0f);
 
-    xt::xtensor<float, 1> step_cost = xt::eval(
-      position_weight_ * position_error +
-      yaw_weight_ * yaw_error +
-      velocity_weight_ * speed_error +
-      velocity_direction_weight_ * velocity_direction_error);
-
-    if (use_curvature_cost_ && curvature_weight_ > 0.0f && t > 0) {
-      const auto prev_x = xt::view(data.trajectories.x, xt::all(), t - 1);
-      const auto prev_y = xt::view(data.trajectories.y, xt::all(), t - 1);
-      const auto prev_yaw = xt::view(data.trajectories.yaws, xt::all(), t - 1);
-      const auto ds_candidate = xt::sqrt(
-        xt::pow(traj_x - prev_x, 2) +
-        xt::pow(traj_y - prev_y, 2));
-      const auto dyaw_candidate = utils::shortest_angular_distance(prev_yaw, traj_yaw);
-      const auto candidate_curvature = xt::clip(
-        dyaw_candidate / xt::maximum(ds_candidate, kEpsilon),
-        -static_cast<float>(max_candidate_curvature_),
-        static_cast<float>(max_candidate_curvature_));
-      const auto curvature_error = xt::fabs(candidate_curvature - ref.curvature);
-      step_cost += curvature_weight_ * curvature_error;
-    }
-
-    if (use_acceleration_cost_ && acceleration_weight_ > 0.0f && t > 0) {
-      const auto prev_vx = xt::view(data.state.vx, xt::all(), t - 1);
-      const auto prev_vy = xt::view(data.state.vy, xt::all(), t - 1);
-      const auto prev_candidate_speed = xt::sqrt(
-        xt::pow(prev_vx, 2) +
-        xt::pow(prev_vy, 2));
-      const auto candidate_acceleration = xt::clip(
-        (candidate_speed - prev_candidate_speed) / model_dt,
-        -static_cast<float>(max_candidate_acceleration_),
-        static_cast<float>(max_candidate_acceleration_));
-      const auto acceleration_error = xt::fabs(candidate_acceleration - ref.acceleration);
-      step_cost += acceleration_weight_ * acceleration_error;
-    }
-
-    if (max_match_distance_ > 0.0) {
-      const auto match_violation = xt::maximum(
-        position_error - static_cast<float>(max_match_distance_), 0.0f);
-      step_cost += distance_penalty_weight_ * match_violation;
-    }
-
-    accumulated_cost += step_cost;
     ++sample_count;
   }
 
@@ -1133,13 +1233,24 @@ void EgoTrajectoryCritic::score(CriticData & data)
     return;
   }
 
+  xt::xtensor<float, 1> debug_added_cost;
   if (debug_runtime) {
-    const auto added_cost = xt::eval(
-      xt::pow(cost_weight_ * (accumulated_cost / sample_count), power_));
-    debugCheckAddedCosts(added_cost);
-    data.costs += added_cost;
-  } else {
-    data.costs += xt::pow(cost_weight_ * (accumulated_cost / sample_count), power_);
+    debug_added_cost = xt::zeros<float>({batch_size});
+  }
+
+  const float sample_count_reciprocal = 1.0f / static_cast<float>(sample_count);
+  for (size_t i = 0; i != batch_size; ++i) {
+    const float mean_weighted_cost = cost_weight_ * accumulated_cost(i) *
+      sample_count_reciprocal;
+    const float added_cost = std::pow(mean_weighted_cost, static_cast<float>(power_));
+    data.costs(i) += added_cost;
+    if (debug_runtime) {
+      debug_added_cost(i) = added_cost;
+    }
+  }
+
+  if (debug_runtime) {
+    debugCheckAddedCosts(debug_added_cost);
   }
 }
 

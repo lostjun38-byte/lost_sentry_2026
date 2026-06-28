@@ -24,6 +24,7 @@
 #include "nav2_mppi_ego_controller/critics/goal_critic.hpp"
 #include "nav2_mppi_ego_controller/critics/obstacles_critic.hpp"
 #include "nav2_mppi_ego_controller/critics/cost_critic.hpp"
+#include "nav2_mppi_ego_controller/critics/ego_trajectory_critic.hpp"
 #include "nav2_mppi_ego_controller/critics/path_align_critic.hpp"
 #include "nav2_mppi_ego_controller/critics/path_align_legacy_critic.hpp"
 #include "nav2_mppi_ego_controller/critics/path_angle_critic.hpp"
@@ -42,6 +43,49 @@ using namespace mppi_ego;  // NOLINT
 using namespace mppi_ego::critics;  // NOLINT
 using namespace mppi_ego::utils;  // NOLINT
 using xt::evaluation_strategy::immediate;
+
+class EgoTrajectoryCriticTester : public EgoTrajectoryCritic
+{
+public:
+  void initialize() override
+  {
+    getParameters();
+  }
+
+  void setTrajectory(const ego_planner_msgs::msg::Trajectory & msg)
+  {
+    trajectoryCallback(std::make_shared<ego_planner_msgs::msg::Trajectory>(msg));
+  }
+
+  size_t getTrajectoryPointStep() const
+  {
+    return trajectory_point_step_;
+  }
+};
+
+ego_planner_msgs::msg::Trajectory makeEgoTrajectory(
+  const rclcpp_lifecycle::LifecycleNode::SharedPtr & node,
+  size_t points,
+  float time_step = 0.1f)
+{
+  ego_planner_msgs::msg::Trajectory trajectory;
+  trajectory.header.stamp = node->now();
+  trajectory.header.frame_id.clear();
+  trajectory.time_step = time_step;
+  trajectory.points.reserve(points);
+
+  for (size_t i = 0; i != points; ++i) {
+    ego_planner_msgs::msg::TrajectoryPoint point;
+    point.x = static_cast<float>(i) * time_step;
+    point.y = 0.0f;
+    point.z = 0.0f;
+    point.yaw = 0.0f;
+    point.velocity = 1.0f;
+    trajectory.points.push_back(point);
+  }
+
+  return trajectory;
+}
 
 TEST(CriticTests, ConstraintsCritic)
 {
@@ -150,6 +194,119 @@ TEST(CriticTests, ObstacleCriticAlignedParams) {
   ObstaclesCritic critic;
   critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
   EXPECT_EQ(critic.getName(), "critic");
+}
+
+TEST(CriticTests, EgoTrajectoryCriticScoresReference)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap");
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  auto getParam = param_handler.getParamGetter("critic");
+  float cost_weight = 1.0f;
+  float position_weight = 1.0f;
+  float yaw_weight = 0.0f;
+  float velocity_weight = 0.0f;
+  float velocity_direction_weight = 0.0f;
+  bool use_curvature_cost = false;
+  bool use_acceleration_cost = false;
+  getParam(cost_weight, "cost_weight", cost_weight);
+  getParam(position_weight, "position_weight", position_weight);
+  getParam(yaw_weight, "yaw_weight", yaw_weight);
+  getParam(velocity_weight, "velocity_weight", velocity_weight);
+  getParam(velocity_direction_weight, "velocity_direction_weight", velocity_direction_weight);
+  getParam(use_curvature_cost, "use_curvature_cost", use_curvature_cost);
+  getParam(use_acceleration_cost, "use_acceleration_cost", use_acceleration_cost);
+
+  models::State state;
+  state.reset(2, 4);
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(2, 4);
+  models::Path path;
+  path.reset(2);
+  path.x(1) = 10.0f;
+  path.y(1) = 0.0f;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({2});
+  float model_dt = 0.1f;
+  CriticData data =
+  {state, generated_trajectories, path, costs, model_dt, false, nullptr, nullptr, std::nullopt,
+    std::nullopt};
+  data.motion_model = std::make_shared<OmniMotionModel>();
+
+  EgoTrajectoryCriticTester critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  critic.setTrajectory(makeEgoTrajectory(node, 10, model_dt));
+
+  for (size_t t = 0; t != 4; ++t) {
+    generated_trajectories.x(0, t) = static_cast<float>(t) * model_dt;
+    generated_trajectories.y(0, t) = 0.0f;
+    generated_trajectories.x(1, t) = static_cast<float>(t) * model_dt;
+    generated_trajectories.y(1, t) = 1.0f;
+  }
+
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 2e-5);
+  EXPECT_GT(costs(1), costs(0));
+}
+
+TEST(CriticTests, EgoTrajectoryCriticSkipsNearGoal)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap");
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  auto getParam = param_handler.getParamGetter("critic");
+  double threshold_to_consider = 0.7;
+  getParam(threshold_to_consider, "threshold_to_consider", threshold_to_consider);
+
+  models::State state;
+  state.reset(1, 3);
+  state.pose.pose.position.x = 0.0;
+  state.pose.pose.position.y = 0.0;
+  models::Trajectories generated_trajectories;
+  generated_trajectories.reset(1, 3);
+  generated_trajectories.y.fill(5.0f);
+  models::Path path;
+  path.reset(2);
+  path.x(1) = 0.2f;
+  path.y(1) = 0.0f;
+  xt::xtensor<float, 1> costs = xt::zeros<float>({1});
+  float model_dt = 0.1f;
+  CriticData data =
+  {state, generated_trajectories, path, costs, model_dt, false, nullptr, nullptr, std::nullopt,
+    std::nullopt};
+  data.motion_model = std::make_shared<OmniMotionModel>();
+
+  EgoTrajectoryCriticTester critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  critic.setTrajectory(makeEgoTrajectory(node, 10, model_dt));
+
+  critic.score(data);
+  EXPECT_NEAR(costs(0), 0.0f, 1e-6);
+}
+
+TEST(CriticTests, EgoTrajectoryCriticSanitizesDynamicPointStep)
+{
+  auto node = std::make_shared<rclcpp_lifecycle::LifecycleNode>("my_node");
+  auto costmap_ros = std::make_shared<nav2_costmap_2d::Costmap2DROS>(
+    "dummy_costmap", "", "dummy_costmap");
+  ParametersHandler param_handler(node);
+  rclcpp_lifecycle::State lstate;
+  costmap_ros->on_configure(lstate);
+
+  EgoTrajectoryCriticTester critic;
+  critic.on_configure(node, "mppi", "critic", costmap_ros, &param_handler);
+  auto result = param_handler.dynamicParamsCallback(
+    {rclcpp::Parameter("critic.trajectory_point_step", -5)});
+
+  EXPECT_TRUE(result.successful);
+  EXPECT_EQ(critic.getTrajectoryPointStep(), 1u);
 }
 
 
